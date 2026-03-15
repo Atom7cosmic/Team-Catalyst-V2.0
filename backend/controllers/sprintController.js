@@ -23,13 +23,15 @@ exports.getSprints = async (req, res) => {
 
     // Access control - can see sprints for teams user has access to
     if (!req.user.isAdmin) {
-      // Get teams where user is manager or member
       const User = require('../models/User');
       const managedTeams = await User.find({ superior: req.user.userId }).select('_id');
       const teamIds = managedTeams.map(t => t._id.toString());
       teamIds.push(req.user.userId);
 
-      query.team = { $in: teamIds };
+      // Only apply team filter if no explicit team was requested
+      if (!team) {
+        query.team = { $in: teamIds };
+      }
     }
 
     const sprints = await Sprint.find(query)
@@ -114,19 +116,23 @@ exports.createSprint = async (req, res) => {
     const {
       name,
       goal,
-      team,
       startDate,
       endDate,
       totalStoryPoints
     } = req.body;
 
-    // Check access to team
-    const hasAccess = await canAccessUser(req.user, team);
-    if (!hasAccess && !req.user.isAdmin) {
-      return res.status(403).json({
-        success: false,
-        message: 'Access denied to this team'
-      });
+    // team defaults to the creating user — they always have access to themselves
+    const team = req.body.team || req.user.userId;
+
+    // Only check access if team is a different user and requester is not admin
+    if (team !== req.user.userId && !req.user.isAdmin) {
+      const hasAccess = await canAccessUser(req.user, team);
+      if (!hasAccess) {
+        return res.status(403).json({
+          success: false,
+          message: 'Access denied to this team'
+        });
+      }
     }
 
     const sprint = new Sprint({
@@ -240,7 +246,6 @@ exports.completeSprint = async (req, res) => {
       });
     }
 
-    // Calculate velocity
     const tasks = await Task.find({ sprint: id, status: 'done' });
     const completedPoints = tasks.reduce((sum, t) => sum + (t.storyPoints || 0), 0);
 
@@ -295,7 +300,6 @@ exports.deleteSprint = async (req, res) => {
       });
     }
 
-    // Remove sprint reference from tasks
     await Task.updateMany(
       { sprint: id },
       { $unset: { sprint: '' } }
@@ -314,4 +318,4 @@ exports.deleteSprint = async (req, res) => {
       message: 'Failed to delete sprint'
     });
   }
-};
+}; 

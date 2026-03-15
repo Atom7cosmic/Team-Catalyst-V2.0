@@ -13,5 +13,6 @@ router.get('/prompts', adminController.getPromptTemplates);
 router.put('/prompts/:id', adminController.updatePromptTemplate);
 router.get('/system-stats', adminController.getSystemStats);
 router.post('/impersonate', adminController.impersonateUser);
+router.post('/users', adminController.createUser);
 
 module.exports = router;

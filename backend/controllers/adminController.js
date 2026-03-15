@@ -227,3 +227,80 @@ exports.impersonateUser = async (req, res) => {
     });
   }
 };
+
+// Create user (admin or superior)
+exports.createUser = async (req, res) => {
+  try {
+    const { firstName, lastName, email, password, role, superior } = req.body;
+
+    if (!firstName || !lastName || !email || !password || !role) {
+      return res.status(400).json({
+        success: false,
+        message: 'firstName, lastName, email, password and role are required'
+      });
+    }
+
+    const existing = await User.findOne({ email });
+    if (existing) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email already in use'
+      });
+    }
+
+    // Determine roleLevel from role
+    const roleLevelMap = {
+      'CEO': 1, 'CTO': 2, 'VP Engineering': 3,
+      'Director of Engineering': 4, 'Engineering Manager': 5,
+      'Tech Lead': 6, 'Senior Engineer': 6,
+      'Software Engineer': 7, 'Junior Engineer': 8,
+      'QA Engineer': 4, 'DevOps Engineer': 7,
+      'Data Engineer': 7, 'Security Engineer': 7,
+      'Intern': 9, 'Admin': 1
+    };
+
+    const roleLevel = roleLevelMap[role] || 7;
+
+    const user = new User({
+      firstName,
+      lastName,
+      email,
+      password,
+      role,
+      roleLevel,
+      superior: superior || req.user.userId,
+      isFirstLogin: true
+    });
+
+    await user.save();
+
+    await AuditLog.create({
+      user: req.user.userId,
+      action: 'user_create',
+      resourceType: 'user',
+      resourceId: user._id,
+      newValue: { firstName, lastName, email, role },
+      success: true,
+      ipAddress: req.ip
+    });
+
+    res.status(201).json({
+      success: true,
+      message: 'User created successfully',
+      user: {
+        _id: user._id,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        email: user.email,
+        role: user.role,
+        roleLevel: user.roleLevel
+      }
+    });
+  } catch (error) {
+    logger.error(`Create user error: ${error.message}`);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to create user'
+    });
+  }
+};

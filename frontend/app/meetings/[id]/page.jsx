@@ -10,23 +10,13 @@ import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import {
-  Calendar,
-  Clock,
-  Users,
-  Mic,
-  FileText,
-  CheckSquare,
-  ArrowLeft,
-  Download,
-  Plus,
-  ExternalLink,
-  Loader2,
-  AlertCircle,
-  StopCircle
+  Calendar, Clock, Users, Mic, FileText,
+  CheckSquare, ArrowLeft, Download, Plus,
+  Loader2, AlertCircle, StopCircle
 } from 'lucide-react';
 import { format } from 'date-fns';
 import api from '@/lib/axios';
-import { CardSkeleton, ListSkeleton } from '@/components/shared/Skeleton';
+import { CardSkeleton } from '@/components/shared/Skeleton';
 import AttendeeContributionCard from '@/components/meeting/AttendeeContributionCard';
 import ProcessingStepIndicator from '@/components/meeting/ProcessingStepIndicator';
 import MeetingQAPanel from '@/components/meeting/MeetingQAPanel';
@@ -40,14 +30,18 @@ export default function MeetingDetailPage({ params }) {
   const [isLoading, setIsLoading] = useState(true);
   const [isEnding, setIsEnding] = useState(false);
   const [processingStatus, setProcessingStatus] = useState(null);
+  const [activeTab, setActiveTab] = useState('summary');
 
   useEffect(() => {
     fetchMeeting();
+  }, [params?.id]);
+
+  useEffect(() => {
     if (meeting?.status === 'processing') {
       const interval = setInterval(fetchProcessingStatus, 5000);
       return () => clearInterval(interval);
     }
-  }, [params?.id]);
+  }, [meeting?.status]);
 
   const fetchMeeting = async () => {
     if (!params?.id) return;
@@ -85,13 +79,400 @@ export default function MeetingDetailPage({ params }) {
       toast.success('Meeting ended successfully');
       fetchMeeting();
     } catch (error) {
-      const msg = error?.response?.data?.message || 'Failed to end meeting';
-      toast.error(msg);
-      console.error('End meeting error:', error);
+      toast.error(error?.response?.data?.message || 'Failed to end meeting');
     } finally {
       setIsEnding(false);
     }
   };
+
+  // ── STYLED XLSX EXPORT ──────────────────────────────────────────────────────
+  const handleExport = async () => {
+    if (!meeting) return;
+
+    const loadingToast = toast.loading('Generating Excel report...');
+
+    try {
+      // Dynamically load ExcelJS from CDN
+      await new Promise((resolve, reject) => {
+        if (window.ExcelJS) return resolve();
+        const script = document.createElement('script');
+        script.src = 'https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js';
+        script.onload = resolve;
+        script.onerror = reject;
+        document.head.appendChild(script);
+      });
+
+      const ExcelJS = window.ExcelJS;
+      const wb = new ExcelJS.Workbook();
+      wb.creator = 'OrgOS';
+      const ws = wb.addWorksheet('Meeting Summary', { views: [{ showGridLines: false }] });
+
+      // ── Palette ──
+      const DARK_BG      = '1E1E2E';
+      const ACCENT       = '6C63FF';
+      const ACCENT_LIGHT = 'EAE8FF';
+      const MID_BG       = 'F5F4FF';
+      const WHITE        = 'FFFFFFFF';
+      const BORDER_CLR   = 'FFD0CEEE';
+      const TEXT_DARK    = 'FF1A1A2E';
+      const TEXT_MID     = 'FF4A4A6A';
+      const TEXT_MUTED   = 'FFAAAACC';
+      const GREEN_BG     = 'FFE6F4EA';
+      const GREEN_DARK   = 'FF2E7D32';
+      const ORANGE_BG    = 'FFFFF3E0';
+      const ORANGE_DARK  = 'FFE65100';
+      const RED_BG       = 'FFFDECEA';
+      const RED_DARK     = 'FFB71C1C';
+      const HDR_BG       = '3D3A6E';
+
+      // ── Column widths ──
+      ws.columns = [
+        { width: 3 },   // A — gutter
+        { width: 22 },  // B — label
+        { width: 36 },  // C — value / task
+        { width: 22 },  // D — owner / key points
+        { width: 16 },  // E — deadline / score
+        { width: 14 },  // F — status / speaking time
+        { width: 3 },   // G — gutter
+      ];
+
+      const thinBorder = {
+        top:    { style: 'thin', color: { argb: BORDER_CLR } },
+        bottom: { style: 'thin', color: { argb: BORDER_CLR } },
+        left:   { style: 'thin', color: { argb: BORDER_CLR } },
+        right:  { style: 'thin', color: { argb: BORDER_CLR } },
+      };
+
+      const solidFill = (hex) => ({
+        type: 'pattern', pattern: 'solid',
+        fgColor: { argb: hex.replace('#', '').length === 6 ? 'FF' + hex.replace('#', '') : hex.replace('#', '') }
+      });
+
+      const font = (opts = {}) => ({
+        name: 'Arial',
+        size: opts.size || 10,
+        bold: opts.bold || false,
+        italic: opts.italic || false,
+        color: { argb: (opts.color || TEXT_DARK).replace('#', '') },
+      });
+
+      const align = (h = 'left', v = 'middle', wrap = false) => ({
+        horizontal: h, vertical: v, wrapText: wrap,
+      });
+
+      // Helper: set a cell
+      const setCell = (row, col, value, opts = {}) => {
+        const c = ws.getCell(row, col);
+        c.value = value;
+        c.font = font(opts);
+        c.alignment = align(opts.align || 'left', 'middle', opts.wrap || false);
+        if (opts.fill) c.fill = solidFill(opts.fill);
+        if (opts.border) c.border = thinBorder;
+        return c;
+      };
+
+      // Helper: merge + set
+      const mergeSet = (r, c1, c2, value, opts = {}) => {
+        ws.mergeCells(r, c1, r, c2);
+        return setCell(r, c1, value, opts);
+      };
+
+      // Helper: section header bar
+      const sectionHeader = (r, label) => {
+        ws.getRow(r).height = 22;
+        mergeSet(r, 1, 7, label, {
+          bold: true, size: 9, color: 'FFFFFFFF',
+          fill: ACCENT, align: 'left',
+          border: true,
+        });
+      };
+
+      // Helper: spacer row
+      const spacer = (r, h = 8, bg = 'FFF8F8FC') => {
+        ws.getRow(r).height = h;
+        for (let c = 1; c <= 7; c++) ws.getCell(r, c).fill = solidFill(bg);
+      };
+
+      // ══════════════════════════════════════════════
+      // HERO HEADER  rows 1–4
+      // ══════════════════════════════════════════════
+      spacer(1, 8, DARK_BG);
+
+      ws.getRow(2).height = 42;
+      mergeSet(2, 1, 7, '📋  Meeting Summary Report', {
+        bold: true, size: 18, color: 'FFFFFFFF', fill: DARK_BG, align: 'center',
+      });
+
+      const attendeeNames = (meeting.attendees || [])
+        .map(a => a.user ? `${a.user.firstName || ''} ${a.user.lastName || ''}`.trim() : (a.name || String(a)))
+        .join('  •  ');
+      const meetingDate = meeting.scheduledDate ? format(new Date(meeting.scheduledDate), 'MMM d, yyyy') : '';
+      const duration = `${meeting.actualDuration || meeting.estimatedDuration || 0} min`;
+
+      ws.getRow(3).height = 20;
+      mergeSet(3, 1, 7,
+        `${meeting.name || ''}  •  ${meetingDate}  •  ${meeting.domain || ''}  •  ${duration}`,
+        { size: 10, color: 'FFAAAACC', fill: DARK_BG, align: 'center', italic: true }
+      );
+
+      spacer(4, 8, DARK_BG);
+
+      // ══════════════════════════════════════════════
+      // MEETING DETAILS  rows 5–12
+      // ══════════════════════════════════════════════
+      spacer(5, 8, 'FFF8F8FC');
+
+      ws.getRow(6).height = 14;
+      mergeSet(6, 1, 7, '  MEETING DETAILS', {
+        bold: true, size: 8, color: ACCENT, fill: 'EAE8FF', align: 'left',
+      });
+
+      const infoRows = [
+        ['Title',         meeting.name || ''],
+        ['Date',          meetingDate],
+        ['Duration',      duration],
+        ['Type / Domain', meeting.domain || ''],
+        ['Status',        `✅  ${meeting.status || ''}`],
+        ['Attendees',     attendeeNames],
+      ];
+      infoRows.forEach(([label, value], i) => {
+        const r = 7 + i;
+        ws.getRow(r).height = 18;
+        setCell(r, 1, '', { fill: 'EAE8FF' });
+        setCell(r, 2, label, { bold: true, size: 9, color: 'FF4A4A6A', fill: 'EAE8FF', border: true });
+        ws.mergeCells(r, 3, r, 6);
+        setCell(r, 3, value, { size: 10, color: 'FF1A1A2E', fill: WHITE, border: true, wrap: true });
+        setCell(r, 7, '', { fill: 'EAE8FF' });
+      });
+
+      spacer(13, 10);
+
+      // ══════════════════════════════════════════════
+      // SUMMARY  rows 14–15
+      // ══════════════════════════════════════════════
+      sectionHeader(14, '  📝  Summary');
+      ws.getRow(15).height = 60;
+      setCell(15, 1, '', { fill: 'EAE8FF' });
+      ws.mergeCells(15, 2, 15, 6);
+      setCell(15, 2, meeting.summary || 'No summary available.', {
+        size: 10, fill: WHITE, border: true, wrap: true, color: 'FF1A1A2E',
+      });
+      setCell(15, 7, '', { fill: 'EAE8FF' });
+
+      // ══════════════════════════════════════════════
+      // KEY CONCLUSIONS  rows 16–N
+      // ══════════════════════════════════════════════
+      spacer(16, 10);
+      sectionHeader(17, '  💡  Key Conclusions');
+      const conclusions = meeting.conclusions || [];
+      const conclusionStart = 18;
+      if (conclusions.length === 0) {
+        ws.getRow(conclusionStart).height = 20;
+        setCell(conclusionStart, 1, '', { fill: 'EAE8FF' });
+        setCell(conclusionStart, 2, '1', { bold: true, size: 11, color: ACCENT, fill: WHITE, align: 'center', border: true });
+        ws.mergeCells(conclusionStart, 3, conclusionStart, 6);
+        setCell(conclusionStart, 3, 'No conclusions recorded.', { size: 10, fill: WHITE, border: true, italic: true, color: 'FF4A4A6A' });
+        setCell(conclusionStart, 7, '', { fill: 'EAE8FF' });
+      } else {
+        conclusions.forEach((txt, i) => {
+          const r = conclusionStart + i;
+          ws.getRow(r).height = 20;
+          const bg = i % 2 === 0 ? WHITE : 'F5F4FF';
+          setCell(r, 1, '', { fill: 'EAE8FF' });
+          setCell(r, 2, `  ${i + 1}`, { bold: true, size: 11, color: ACCENT, fill: bg, align: 'center', border: true });
+          ws.mergeCells(r, 3, r, 6);
+          setCell(r, 3, txt, { size: 10, fill: bg, border: true, wrap: true, color: 'FF1A1A2E' });
+          setCell(r, 7, '', { fill: 'EAE8FF' });
+        });
+      }
+      let nextRow = conclusionStart + Math.max(conclusions.length, 1);
+
+      // ══════════════════════════════════════════════
+      // DECISIONS
+      // ══════════════════════════════════════════════
+      spacer(nextRow, 10); nextRow++;
+      sectionHeader(nextRow, '  ⚖️  Decisions'); nextRow++;
+      const decisions = meeting.decisions || [];
+      if (decisions.length === 0) {
+        ws.getRow(nextRow).height = 20;
+        setCell(nextRow, 1, '', { fill: 'EAE8FF' });
+        setCell(nextRow, 2, '1', { bold: true, size: 11, color: ACCENT, fill: WHITE, align: 'center', border: true });
+        ws.mergeCells(nextRow, 3, nextRow, 6);
+        setCell(nextRow, 3, 'No decisions recorded.', { size: 10, fill: WHITE, border: true, italic: true, color: 'FF4A4A6A' });
+        setCell(nextRow, 7, '', { fill: 'EAE8FF' });
+        nextRow++;
+      } else {
+        decisions.forEach((txt, i) => {
+          ws.getRow(nextRow).height = 20;
+          const bg = i % 2 === 0 ? WHITE : 'F5F4FF';
+          setCell(nextRow, 1, '', { fill: 'EAE8FF' });
+          setCell(nextRow, 2, `  ${i + 1}`, { bold: true, size: 11, color: ACCENT, fill: bg, align: 'center', border: true });
+          ws.mergeCells(nextRow, 3, nextRow, 6);
+          setCell(nextRow, 3, txt, { size: 10, fill: bg, border: true, wrap: true, color: 'FF1A1A2E' });
+          setCell(nextRow, 7, '', { fill: 'EAE8FF' });
+          nextRow++;
+        });
+      }
+
+      // ══════════════════════════════════════════════
+      // ACTION ITEMS
+      // ══════════════════════════════════════════════
+      spacer(nextRow, 10); nextRow++;
+      sectionHeader(nextRow, '  ✅  Action Items'); nextRow++;
+
+      // Table header
+      ws.getRow(nextRow).height = 18;
+      ['', '#', 'Task', 'Assigned To', 'Deadline', 'Status', ''].forEach((h, i) => {
+        const c = ws.getCell(nextRow, i + 1);
+        c.value = h;
+        c.font = font({ bold: true, size: 9, color: 'FFFFFFFF' });
+        c.fill = solidFill(HDR_BG);
+        c.alignment = align((['#', 'Status', 'Deadline'].includes(h)) ? 'center' : 'left');
+        c.border = thinBorder;
+      });
+      nextRow++;
+
+      const actionItems = meeting.actionItems || [];
+      if (actionItems.length === 0) {
+        ws.getRow(nextRow).height = 20;
+        setCell(nextRow, 1, '', { fill: WHITE });
+        setCell(nextRow, 2, '', { fill: WHITE, border: true });
+        ws.mergeCells(nextRow, 3, nextRow, 6);
+        setCell(nextRow, 3, 'No action items recorded.', { size: 10, fill: WHITE, border: true, italic: true, color: 'FF4A4A6A' });
+        setCell(nextRow, 7, '', { fill: WHITE });
+        nextRow++;
+      } else {
+        actionItems.forEach((item, i) => {
+          ws.getRow(nextRow).height = 20;
+          const bg = i % 2 === 0 ? WHITE : 'F5F4FF';
+          const status = item.status || 'pending';
+          let sBg = ORANGE_BG, sClr = ORANGE_DARK;
+          if (status === 'completed')  { sBg = GREEN_BG;  sClr = GREEN_DARK; }
+          if (status === 'in_progress'){ sBg = 'FFE3F2FD'; sClr = 'FF1565C0'; }
+          const ownerName = item.owner
+            ? `${item.owner.firstName || ''} ${item.owner.lastName || ''}`.trim()
+            : '';
+          const deadline = item.deadline ? format(new Date(item.deadline), 'MMM d, yyyy') : '—';
+          setCell(nextRow, 1, '', { fill: bg });
+          setCell(nextRow, 2, `  ${i + 1}`, { bold: true, size: 10, color: ACCENT, fill: bg, align: 'center', border: true });
+          setCell(nextRow, 3, item.task || '', { size: 10, fill: bg, border: true, wrap: true, color: 'FF1A1A2E' });
+          setCell(nextRow, 4, ownerName, { size: 10, fill: bg, border: true, align: 'center', color: 'FF1A1A2E' });
+          setCell(nextRow, 5, deadline, { size: 10, fill: bg, border: true, align: 'center', italic: true, color: 'FF4A4A6A' });
+          setCell(nextRow, 6, status.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()), {
+            bold: true, size: 9, color: sClr, fill: sBg, align: 'center', border: true,
+          });
+          setCell(nextRow, 7, '', { fill: bg });
+          nextRow++;
+        });
+      }
+
+      // ══════════════════════════════════════════════
+      // FOLLOW-UP TOPICS
+      // ══════════════════════════════════════════════
+      spacer(nextRow, 10); nextRow++;
+      sectionHeader(nextRow, '  🔁  Follow-up Topics'); nextRow++;
+      const followUpTopics = meeting.followUpTopics || [];
+      if (followUpTopics.length === 0) {
+        ws.getRow(nextRow).height = 20;
+        setCell(nextRow, 1, '', { fill: 'EAE8FF' });
+        setCell(nextRow, 2, '1', { bold: true, size: 11, color: ACCENT, fill: WHITE, align: 'center', border: true });
+        ws.mergeCells(nextRow, 3, nextRow, 6);
+        setCell(nextRow, 3, 'No follow-up topics recorded.', { size: 10, fill: WHITE, border: true, italic: true, color: 'FF4A4A6A' });
+        setCell(nextRow, 7, '', { fill: 'EAE8FF' });
+        nextRow++;
+      } else {
+        followUpTopics.forEach((txt, i) => {
+          ws.getRow(nextRow).height = 20;
+          const bg = i % 2 === 0 ? WHITE : 'F5F4FF';
+          setCell(nextRow, 1, '', { fill: 'EAE8FF' });
+          setCell(nextRow, 2, `  ${i + 1}`, { bold: true, size: 11, color: ACCENT, fill: bg, align: 'center', border: true });
+          ws.mergeCells(nextRow, 3, nextRow, 6);
+          setCell(nextRow, 3, txt, { size: 10, fill: bg, border: true, wrap: true, color: 'FF1A1A2E' });
+          setCell(nextRow, 7, '', { fill: 'EAE8FF' });
+          nextRow++;
+        });
+      }
+
+      // ══════════════════════════════════════════════
+      // ATTENDEE CONTRIBUTIONS
+      // ══════════════════════════════════════════════
+      spacer(nextRow, 10); nextRow++;
+      sectionHeader(nextRow, '  👥  Attendee Contributions'); nextRow++;
+
+      ws.getRow(nextRow).height = 18;
+      [['', 1], ['Attendee', 2], ['Score', 3], ['Key Points', 4], ['Speaking Time', 6], ['', 7]].forEach(([h, c]) => {
+        const cell = ws.getCell(nextRow, c);
+        cell.value = h;
+        cell.font = font({ bold: true, size: 9, color: 'FFFFFFFF' });
+        cell.fill = solidFill(HDR_BG);
+        cell.alignment = align(['Score', 'Speaking Time'].includes(h) ? 'center' : 'left');
+        cell.border = thinBorder;
+      });
+      ws.mergeCells(nextRow, 4, nextRow, 5);
+      nextRow++;
+
+      const contributions = meeting.attendeeContributions || [];
+      if (contributions.length === 0) {
+        ws.getRow(nextRow).height = 20;
+        setCell(nextRow, 1, '', { fill: WHITE });
+        ws.mergeCells(nextRow, 2, nextRow, 6);
+        setCell(nextRow, 2, 'No contribution data available.', { size: 10, fill: WHITE, border: true, italic: true, color: 'FF4A4A6A' });
+        setCell(nextRow, 7, '', { fill: WHITE });
+        nextRow++;
+      } else {
+        contributions.forEach((c, i) => {
+          ws.getRow(nextRow).height = 22;
+          const bg = i % 2 === 0 ? WHITE : 'F5F4FF';
+          const score = c.contributionScore ?? c.score ?? 0;
+          let sBg = RED_BG, sClr = RED_DARK;
+          if (score >= 8) { sBg = GREEN_BG; sClr = GREEN_DARK; }
+          else if (score >= 5) { sBg = ORANGE_BG; sClr = ORANGE_DARK; }
+          const keyPoints = Array.isArray(c.keyPoints) ? c.keyPoints.join(' | ') : (c.keyPoints || '');
+          setCell(nextRow, 1, '', { fill: bg });
+          setCell(nextRow, 2, `  ${c.name || ''}`, { bold: true, size: 10, fill: bg, border: true, color: 'FF1A1A2E' });
+          setCell(nextRow, 3, score, { bold: true, size: 11, color: sClr, fill: sBg, align: 'center', border: true });
+          ws.mergeCells(nextRow, 4, nextRow, 5);
+          setCell(nextRow, 4, keyPoints, { size: 9, fill: bg, border: true, wrap: true, color: 'FF4A4A6A' });
+          setCell(nextRow, 6, c.speakingTime || '—', { size: 9, fill: bg, border: true, align: 'center', color: 'FF4A4A6A' });
+          setCell(nextRow, 7, '', { fill: bg });
+          nextRow++;
+        });
+      }
+
+      // ══════════════════════════════════════════════
+      // FOOTER
+      // ══════════════════════════════════════════════
+      spacer(nextRow, 8); nextRow++;
+      ws.getRow(nextRow).height = 18;
+      mergeSet(nextRow, 1, 7,
+        'Generated by OrgOS  •  AI-Powered Organization Operating System',
+        { size: 8, color: 'FFAAAACC', fill: DARK_BG, align: 'center', italic: true }
+      );
+
+      // ── Download ──
+      const buffer = await wb.xlsx.writeBuffer();
+      const blob = new Blob([buffer], {
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      const safeName = (meeting.name || 'meeting').replace(/[^a-z0-9]/gi, '_').toLowerCase();
+      link.href = url;
+      link.download = `${safeName}_summary.xlsx`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+
+      toast.dismiss(loadingToast);
+      toast.success('Excel report exported!');
+    } catch (err) {
+      console.error('Export failed:', err);
+      toast.dismiss(loadingToast);
+      toast.error('Export failed. Please try again.');
+    }
+  };
+  // ───────────────────────────────────────────────────────────────────────────
 
   const getStatusColor = (status) => {
     switch (status) {
@@ -99,6 +480,7 @@ export default function MeetingDetailPage({ params }) {
       case 'processing': return 'bg-yellow-500/20 text-yellow-400';
       case 'scheduled': return 'bg-blue-500/20 text-blue-400';
       case 'live': return 'bg-red-500/20 text-red-400';
+      case 'cancelled': return 'bg-red-900/20 text-red-700';
       case 'completed': return 'bg-slate-500/20 text-muted-foreground';
       default: return 'bg-slate-500/20 text-muted-foreground';
     }
@@ -116,10 +498,11 @@ export default function MeetingDetailPage({ params }) {
     return colors[domain] || colors['Custom'];
   };
 
-  // Proper host check — compare string versions to avoid ObjectId mismatch
   const hostId = meeting?.host?._id?.toString() || meeting?.host?.toString();
   const userId = user?._id?.toString() || user?.id?.toString();
   const isHost = !!(hostId && userId && hostId === userId);
+  const isProcessing = meeting?.status === 'processing';
+  const isReady = meeting?.status === 'ready' || meeting?.status === 'completed';
 
   if (isLoading) {
     return (
@@ -151,12 +534,20 @@ export default function MeetingDetailPage({ params }) {
     );
   }
 
-  const isProcessing = meeting.status === 'processing';
-  const isReady = meeting.status === 'ready' || meeting.status === 'completed';
-
   return (
     <DashboardLayout>
       <div className="space-y-6">
+
+        {/* Cancelled banner */}
+        {meeting.status === 'cancelled' && (
+          <div className="bg-red-900/20 border border-red-800/50 rounded-lg p-4 flex items-center gap-3">
+            <AlertCircle className="h-5 w-5 text-red-400 shrink-0" />
+            <p className="text-red-300 text-sm">
+              This meeting has been cancelled by the host.
+            </p>
+          </div>
+        )}
+
         {/* Header */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div className="flex items-center gap-4">
@@ -173,41 +564,71 @@ export default function MeetingDetailPage({ params }) {
               <p className="text-muted-foreground">{meeting.description}</p>
             </div>
           </div>
-          <div className="flex gap-2">
+
+          <div className="flex gap-2 flex-wrap">
+            {/* Export XLSX — styled Excel report */}
             {isReady && (
-              <Button variant="outline" onClick={() => toast.success('Export started')} className="border-slate-700">
+              <Button variant="outline" onClick={handleExport} className="border-slate-700">
                 <Download className="mr-2 h-4 w-4" />
-                Export
+                Export Excel
               </Button>
             )}
+
+            {/* Join — only when scheduled */}
             {meeting.status === 'scheduled' && (
-              <Button onClick={() => router.push(`/meetings/${meeting._id}/room`)} className="bg-green-600 hover:bg-green-700">
+              <Button
+                onClick={() => router.push(`/meetings/${meeting._id}/room`)}
+                className="bg-green-600 hover:bg-green-700"
+              >
                 <Mic className="mr-2 h-4 w-4" />
                 Join Meeting
               </Button>
             )}
+
+            {/* Rejoin — only when live */}
             {meeting.status === 'live' && (
-              <Button onClick={() => router.push(`/meetings/${meeting._id}/room`)} className="bg-green-600 hover:bg-green-700">
+              <Button
+                onClick={() => router.push(`/meetings/${meeting._id}/room`)}
+                className="bg-green-600 hover:bg-green-700"
+              >
                 <Mic className="mr-2 h-4 w-4" />
                 Rejoin Meeting
               </Button>
             )}
+
+            {/* End Meeting — host only, scheduled or live */}
             {(meeting.status === 'live' || meeting.status === 'scheduled') && isHost && (
               <Button
                 onClick={handleEndMeeting}
                 disabled={isEnding}
                 className="bg-red-600 hover:bg-red-700"
               >
-                {isEnding ? (
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                ) : (
-                  <StopCircle className="mr-2 h-4 w-4" />
-                )}
+                {isEnding
+                  ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  : <StopCircle className="mr-2 h-4 w-4" />
+                }
                 End Meeting
               </Button>
             )}
+
+            {/* View Summary — always visible after meeting ends */}
+            {['ready', 'completed', 'processing'].includes(meeting.status) && (
+              <Button
+                variant="outline"
+                className="border-slate-700"
+                onClick={() => setActiveTab('summary')}
+              >
+                <FileText className="mr-2 h-4 w-4" />
+                View Summary
+              </Button>
+            )}
+
+            {/* Schedule Follow-up — only when ready */}
             {isReady && (
-              <Button onClick={() => router.push(`/meetings/${meeting._id}/schedule-followup`)} className="bg-blue-600 hover:bg-blue-700">
+              <Button
+                onClick={() => router.push(`/meetings/${meeting._id}/schedule-followup`)}
+                className="bg-blue-600 hover:bg-blue-700"
+              >
                 <Plus className="mr-2 h-4 w-4" />
                 Schedule Follow-up
               </Button>
@@ -227,7 +648,7 @@ export default function MeetingDetailPage({ params }) {
           </Card>
         )}
 
-        {/* Meeting Info */}
+        {/* Meeting Info Cards */}
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
           <Card className="bg-card border-muted">
             <CardContent className="flex items-center gap-3 py-4">
@@ -243,7 +664,7 @@ export default function MeetingDetailPage({ params }) {
               <Clock className="h-5 w-5 text-muted-foreground" />
               <div>
                 <p className="text-sm text-slate-500">Duration</p>
-                <p className="font-medium">{meeting.actualDuration || meeting.estimatedDuration} min</p>
+                <p className="font-medium">{meeting.actualDuration || meeting.estimatedDuration || 0} min</p>
               </div>
             </CardContent>
           </Card>
@@ -269,7 +690,7 @@ export default function MeetingDetailPage({ params }) {
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <div className="lg:col-span-2 space-y-6">
-            <Tabs defaultValue="summary" className="space-y-4">
+            <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
               <TabsList className="bg-card border border-muted">
                 <TabsTrigger value="summary">Summary</TabsTrigger>
                 <TabsTrigger value="transcript">Transcript</TabsTrigger>
@@ -312,7 +733,11 @@ export default function MeetingDetailPage({ params }) {
                       </>
                     ) : (
                       <p className="text-slate-500">
-                        {isProcessing ? 'Summary will be available after processing...' : 'No summary available'}
+                        {isProcessing
+                          ? 'Summary will be available after processing...'
+                          : meeting.status === 'cancelled'
+                          ? 'Meeting was cancelled — no summary available.'
+                          : 'No summary available'}
                       </p>
                     )}
                   </CardContent>
@@ -325,20 +750,26 @@ export default function MeetingDetailPage({ params }) {
                     <CardTitle>Transcript</CardTitle>
                   </CardHeader>
                   <CardContent>
-                    {meeting.transcriptSegments?.length > 0 ? (
+                    {meeting.transcriptRaw ? (
                       <ScrollArea className="h-[400px]">
                         <div className="space-y-4">
-                          {meeting.transcriptSegments.map((segment, i) => (
-                            <div key={i} className="p-3 bg-muted/50 rounded-lg">
-                              <div className="flex items-center gap-2 mb-1">
-                                <span className="font-medium text-blue-400">{segment.speaker}</span>
-                                <span className="text-xs text-slate-500">
-                                  {Math.floor(segment.startTime / 60)}:{(segment.startTime % 60).toString().padStart(2, '0')}
-                                </span>
+                          {meeting.transcriptSegments?.length > 0 && meeting.transcriptSegments.some(s => s.text) ? (
+                            meeting.transcriptSegments.map((segment, i) => (
+                              <div key={i} className="p-3 bg-muted/50 rounded-lg">
+                                <div className="flex items-center gap-2 mb-1">
+                                  <span className="font-medium text-blue-400">{segment.speaker}</span>
+                                  <span className="text-xs text-slate-500">
+                                    {Math.floor(segment.startTime / 60)}:{(segment.startTime % 60).toString().padStart(2, '0')}
+                                  </span>
+                                </div>
+                                <p className="text-slate-300">{segment.text}</p>
                               </div>
-                              <p className="text-slate-300">{segment.text}</p>
+                            ))
+                          ) : (
+                            <div className="p-3 bg-muted/50 rounded-lg">
+                              <p className="text-slate-300 whitespace-pre-wrap">{meeting.transcriptRaw}</p>
                             </div>
-                          ))}
+                          )}
                         </div>
                       </ScrollArea>
                     ) : (

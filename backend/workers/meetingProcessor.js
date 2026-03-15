@@ -1,9 +1,9 @@
 const { Worker } = require('bullmq');
-const { exec } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const ffmpeg = require('fluent-ffmpeg');
 const { promisify } = require('util');
+const Groq = require('groq-sdk');
 const { Meeting, PromptTemplate, Performance, Notification } = require('../models');
 const { chromaClient } = require('../config/chroma');
 const { generateEmbedding } = require('../ai/embeddings');
@@ -11,7 +11,7 @@ const { meetingAnalysisChain, chunkTranscript, scoreAttendeeChain } = require('.
 const { getFileUrl } = require('../config/s3');
 const winston = require('winston');
 
-const execAsync = promisify(exec);
+const execAsync = promisify(require('child_process').exec);
 
 const logger = winston.createLogger({
   level: 'info',
@@ -21,6 +21,8 @@ const logger = winston.createLogger({
   ),
   transports: [new winston.transports.Console()]
 });
+
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 // Update processing step
 async function updateStep(meetingId, step, status, message = null, io = null) {
@@ -33,14 +35,8 @@ async function updateStep(meetingId, step, status, message = null, io = null) {
       if (message) stepObj.message = message;
     }
     await meeting.save();
-
-    // Emit via socket if available
     if (io) {
-      io.to(meetingId).emit('processing-update', {
-        step,
-        status,
-        message
-      });
+      io.to(meetingId).emit('processing-update', { step, status, message });
     }
   }
 }
@@ -48,14 +44,13 @@ async function updateStep(meetingId, step, status, message = null, io = null) {
 // Download audio from S3
 async function downloadAudio(audioKey) {
   const url = await getFileUrl(audioKey, 3600);
-  const tempDir = path.join(__dirname, '../../temp');
+  const tempDir = '/temp';
 
   if (!fs.existsSync(tempDir)) {
     fs.mkdirSync(tempDir, { recursive: true });
   }
 
   const localPath = path.join(tempDir, `${Date.now()}-${path.basename(audioKey)}`);
-
   const response = await fetch(url);
   const buffer = await response.arrayBuffer();
   fs.writeFileSync(localPath, Buffer.from(buffer));
@@ -65,17 +60,21 @@ async function downloadAudio(audioKey) {
 
 // Get audio duration using ffprobe
 function getAudioDuration(filePath) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     ffmpeg.ffprobe(filePath, (err, metadata) => {
-      if (err) return reject(err);
-      resolve(metadata.format.duration);
+      if (err) {
+        logger.warn(`ffprobe error: ${err.message} — defaulting duration to 0`);
+        return resolve(0);
+      }
+      const duration = metadata?.format?.duration;
+      resolve(typeof duration === 'number' && !isNaN(duration) ? duration : 0);
     });
   });
 }
 
 // Split audio into chunks
-async function splitAudio(filePath, chunkDuration = 600) { // 10 minutes
-  const outputDir = path.join(__dirname, '../../temp/chunks');
+async function splitAudio(filePath, chunkDuration = 600) {
+  const outputDir = '/temp/chunks';
   if (!fs.existsSync(outputDir)) {
     fs.mkdirSync(outputDir, { recursive: true });
   }
@@ -95,7 +94,6 @@ async function splitAudio(filePath, chunkDuration = 600) { // 10 minutes
         `-reset_timestamps 1`
       ])
       .on('end', () => {
-        // Get list of chunk files
         const chunks = fs.readdirSync(outputDir)
           .filter(f => f.startsWith(`${baseName}_chunk_`))
           .map(f => path.join(outputDir, f))
@@ -107,70 +105,60 @@ async function splitAudio(filePath, chunkDuration = 600) { // 10 minutes
   });
 }
 
-// Transcribe audio using whisper.cpp
-async function transcribeWithWhisper(audioPath, modelPath) {
-  const outputPath = audioPath.replace(/\.[^/.]+$/, '');
-  const whisperBinary = path.join(__dirname, '../models/whisper/main');
-  const whisperModel = path.join(__dirname, '../models/whisper/ggml-base.bin');
-  const whisperCmd = `${whisperBinary} -m ${whisperModel} -f ${audioPath} -otxt -of ${outputPath} --language auto`;
-
-
+// Transcribe using Groq Whisper API
+async function transcribeWithGroq(audioPath) {
   try {
-    await execAsync(whisperCmd, { timeout: 300000 }); // 5 minute timeout
-
-    const transcriptPath = `${outputPath}.txt`;
-    if (fs.existsSync(transcriptPath)) {
-      return fs.readFileSync(transcriptPath, 'utf8');
-    }
-
-    return '';
+    logger.info(`Transcribing with Groq Whisper: ${audioPath}`);
+    const audioStream = fs.createReadStream(audioPath);
+    const transcription = await groq.audio.transcriptions.create({
+      file: audioStream,
+      model: 'whisper-large-v3',
+      response_format: 'text',
+      language: 'en',
+    });
+    return typeof transcription === 'string' ? transcription : transcription.text || '';
   } catch (error) {
-    logger.error(`Whisper transcription error: ${error.message}`);
+    logger.error(`Groq transcription error: ${error.message}`);
     throw error;
   }
 }
 
 // Basic speaker diarization using silence detection
 async function performDiarization(audioPath, numSpeakers) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     const segments = [];
     let currentSpeaker = 0;
     let lastEndTime = 0;
 
     ffmpeg(audioPath)
-      .audioFilters([
-        'silencedetect=noise=-30dB:d=0.5',
-        'volumedetect'
-      ])
+      .audioFilters(['silencedetect=noise=-30dB:d=0.5', 'volumedetect'])
       .outputOptions('-f null')
       .output('-')
       .on('stderr', (stderrLine) => {
         const line = stderrLine.toString();
-
-        // Parse silence detection
         const silenceStart = line.match(/silence_start: ([\d.]+)/);
-        const silenceEnd = line.match(/silence_end: ([\d.]+)/);
-
         if (silenceStart) {
           const startTime = lastEndTime;
           const endTime = parseFloat(silenceStart[1]);
-
           segments.push({
             speaker: `Speaker_${currentSpeaker + 1}`,
             start: startTime,
             end: endTime
           });
-
           lastEndTime = endTime;
-          currentSpeaker = (currentSpeaker + 1) % numSpeakers;
+          currentSpeaker = (currentSpeaker + 1) % (numSpeakers || 1);
         }
       })
-      .on('end', () => {
-        resolve(segments);
-      })
-      .on('error', reject)
+      .on('end', () => resolve(segments))
+      .on('error', () => resolve([]))
       .run();
   });
+}
+
+function formatTime(seconds) {
+  const mins = Math.floor(seconds / 60);
+  const secs = Math.floor(seconds % 60);
+  return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
 }
 
 // Process meeting
@@ -184,51 +172,41 @@ async function processMeeting(job) {
     const meeting = await Meeting.findById(meetingId)
       .populate('attendees.user', 'firstName lastName');
 
-    if (!meeting) {
-      throw new Error('Meeting not found');
-    }
+    if (!meeting) throw new Error('Meeting not found');
 
-    // Step 1: Download audio
     await updateStep(meetingId, 'upload', 'done', 'Audio downloaded', io);
-
-    // Step 2: Transcription
     await updateStep(meetingId, 'transcription', 'running', 'Starting transcription', io);
 
     const localAudioPath = await downloadAudio(audioKey);
-    const duration = await getAudioDuration(localAudioPath);
-    meeting.actualDuration = Math.round(duration / 60);
+
+    // ✅ Safe duration — never NaN
+    const rawDuration = await getAudioDuration(localAudioPath);
+    meeting.actualDuration = (rawDuration && !isNaN(rawDuration))
+      ? Math.round(rawDuration / 60)
+      : 0;
 
     let transcript = '';
-    let segments = [];
 
-    if (duration > 600) { // > 10 minutes, split into chunks
+    const fileSizeMB = fs.statSync(localAudioPath).size / (1024 * 1024);
+
+    if (fileSizeMB > 24 || rawDuration > 600) {
+      logger.info('Large file detected, splitting into chunks');
       const chunks = await splitAudio(localAudioPath);
       let timeOffset = 0;
 
       for (const chunk of chunks) {
-        const chunkTranscript = await transcribeWithWhisper(
-          chunk,
-          process.env.WHISPER_MODEL_PATH || './models/whisper'
-        );
-
-        // Add time offset to transcript
-        const lines = chunkTranscript.split('\n');
+        const chunkText = await transcribeWithGroq(chunk);
+        const lines = chunkText.split('\n');
         for (const line of lines) {
           if (line.trim()) {
             transcript += `[${formatTime(timeOffset)}] ${line}\n`;
           }
         }
-
         timeOffset += 600;
-
-        // Clean up chunk
-        fs.unlinkSync(chunk);
+        try { fs.unlinkSync(chunk); } catch (e) {}
       }
     } else {
-      transcript = await transcribeWithWhisper(
-        localAudioPath,
-        process.env.WHISPER_MODEL_PATH || './models/whisper'
-      );
+      transcript = await transcribeWithGroq(localAudioPath);
     }
 
     meeting.transcriptRaw = transcript;
@@ -240,127 +218,159 @@ async function processMeeting(job) {
     const numSpeakers = meeting.attendees.length;
     const diarizationSegments = await performDiarization(localAudioPath, numSpeakers);
 
-    // Map speakers to attendees (simplified - assumes speaking order)
     const speakerMap = {};
     meeting.attendees.forEach((attendee, idx) => {
-      speakerMap[`Speaker_${idx + 1}`] = attendee.user.fullName;
+      const name = attendee.user?.firstName
+        ? `${attendee.user.firstName} ${attendee.user.lastName}`
+        : `Speaker ${idx + 1}`;
+      speakerMap[`Speaker_${idx + 1}`] = name;
     });
 
-    // Create transcript segments
-    segments = diarizationSegments.map(seg => ({
+    meeting.transcriptSegments = diarizationSegments.map(seg => ({
       speaker: speakerMap[seg.speaker] || 'Unknown Speaker',
       startTime: seg.start,
       endTime: seg.end,
-      text: '' // Would need to align with transcript
+      text: ''
     }));
 
-    meeting.transcriptSegments = segments;
     await updateStep(meetingId, 'diarization', 'done', 'Speaker detection complete', io);
 
     // Step 4: Analysis
     await updateStep(meetingId, 'analysis', 'running', 'Analyzing meeting content', io);
 
-    // Get prompt template for domain
     const promptTemplate = await PromptTemplate.findOne({
       domain: meeting.domain,
       isActive: true
     });
 
     if (!promptTemplate) {
-      throw new Error(`No prompt template found for domain: ${meeting.domain}`);
+      logger.warn(`No prompt template for domain: ${meeting.domain}, using default`);
     }
 
-    // Run analysis
     const analysis = await meetingAnalysisChain(
       transcript,
       meeting.domain,
       meeting.attendees.map(a => a.user),
-      promptTemplate
+      promptTemplate || {
+        systemPrompt: 'You are a meeting analyst. Analyze the meeting transcript and return structured insights.',
+        userPromptTemplate: 'Analyze this {domain} meeting transcript:\n\n{transcript}\n\nAttendees: {attendees}\n\nReturn JSON with: summary, conclusions, decisions, actionItems (array with owner/task/deadline fields), followUpTopics, attendeeContributions (array with name/score/keyPoints fields)'
+      }
     );
 
     meeting.summary = analysis.summary;
     meeting.conclusions = analysis.conclusions || [];
     meeting.decisions = analysis.decisions || [];
-    meeting.actionItems = (analysis.actionItems || []).map(item => ({
-      owner: meeting.attendees.find(a =>
-        a.user.fullName.toLowerCase().includes(item.owner?.toLowerCase())
-      )?.user?._id || meeting.host,
-      task: item.task,
-      deadline: item.deadline ? new Date(item.deadline) : null,
-      status: 'pending'
-    }));
+    meeting.actionItems = (analysis.actionItems || []).map(item => {
+      let deadline = null;
+      if (item.deadline) {
+        const parsed = new Date(item.deadline);
+        deadline = isNaN(parsed.getTime()) ? null : parsed;
+      }
+      return {
+        owner: meeting.attendees.find(a => {
+          const name = `${a.user?.firstName} ${a.user?.lastName}`.toLowerCase();
+          return name.includes((item.owner || '').toLowerCase());
+        })?.user?._id || meeting.host,
+        task: item.task,
+        deadline,
+        status: 'pending'
+      };
+    });
     meeting.followUpTopics = analysis.followUpTopics || [];
 
-    // Score attendee contributions
+    // Score attendees
     for (const attendee of meeting.attendees) {
-      const contribution = await scoreAttendeeChain(
-        attendee.user.fullName,
-        transcript,
-        meeting.domain
-      );
+      const name = `${attendee.user?.firstName} ${attendee.user?.lastName}`;
+      try {
+        const contribution = await scoreAttendeeChain(name, transcript, meeting.domain);
 
-      attendee.contributionScore = contribution.score;
-      attendee.keyPoints = contribution.keyPoints || [];
+        // ✅ Safe score — never NaN
+        const score = (contribution.score && !isNaN(contribution.score))
+          ? contribution.score
+          : 5;
 
-      meeting.attendeeContributions.push({
-        user: attendee.user._id,
-        score: contribution.score,
-        keyPoints: contribution.keyPoints || [],
-        speakingTime: 0 // Would calculate from diarization
-      });
+        attendee.contributionScore = score;
+        attendee.keyPoints = contribution.keyPoints || [];
+
+        meeting.attendeeContributions = meeting.attendeeContributions || [];
+        meeting.attendeeContributions.push({
+          user: attendee.user._id,
+          score,
+          keyPoints: contribution.keyPoints || [],
+          speakingTime: 0
+        });
+      } catch (e) {
+        logger.warn(`Score failed for ${name}: ${e.message}`);
+      }
     }
 
     await updateStep(meetingId, 'analysis', 'done', 'Analysis complete', io);
 
-    // Step 5: Embedding and storage
+    // Step 5: Embeddings
     await updateStep(meetingId, 'embedding', 'running', 'Storing embeddings', io);
 
-    // Chunk transcript
-    const chunks = chunkTranscript(transcript, 300);
-    const collection = await chromaClient.getCollection({ name: 'meeting_transcripts' });
+    try {
+      const chunks = chunkTranscript(transcript, 300);
+      const collection = await chromaClient.getCollection({ name: 'meeting_transcripts' });
 
-    for (let i = 0; i < chunks.length; i++) {
-      const chunk = chunks[i];
-      const embedding = await generateEmbedding(chunk);
-
-      await collection.add({
-        ids: [`${meetingId}_chunk_${i}`],
-        embeddings: [embedding],
-        documents: [chunk],
-        metadatas: [{
-          meetingId: meetingId.toString(),
-          domain: meeting.domain,
-          date: meeting.scheduledDate.toISOString(),
-          attendees: meeting.attendees.map(a => a.user.fullName).join(', '),
-          chunkIndex: i
-        }]
-      });
+      for (let i = 0; i < chunks.length; i++) {
+        const embedding = await generateEmbedding(chunks[i]);
+        await collection.add({
+          ids: [`${meetingId}_chunk_${i}`],
+          embeddings: [embedding],
+          documents: [chunks[i]],
+          metadatas: [{
+            meetingId: meetingId.toString(),
+            domain: meeting.domain,
+            date: meeting.scheduledDate.toISOString(),
+            attendees: meeting.attendees.map(a =>
+              `${a.user?.firstName} ${a.user?.lastName}`).join(', '),
+            chunkIndex: i
+          }]
+        });
+      }
+    } catch (e) {
+      logger.warn(`Embedding storage failed: ${e.message}`);
     }
 
     await updateStep(meetingId, 'embedding', 'done', 'Embeddings stored', io);
 
-    // Step 6: Update performance for attendees
+    // Update performance for attendees
     for (const attendee of meeting.attendees) {
-      const performance = await Performance.findOne({ user: attendee.user._id });
-      if (performance) {
-        performance.meetingStats.totalMeetings += 1;
+      try {
+        const performance = await Performance.findOne({ user: attendee.user._id });
+        if (performance) {
+          performance.meetingStats = performance.meetingStats || {
+            totalMeetings: 0,
+            avgContributionScore: 0
+          };
+          performance.meetingStats.totalMeetings += 1;
 
-        const totalScore = performance.meetingStats.avgContributionScore *
-          (performance.meetingStats.totalMeetings - 1) +
-          (attendee.contributionScore || 5);
-        performance.meetingStats.avgContributionScore =
-          totalScore / performance.meetingStats.totalMeetings;
+          const prevAvg = performance.meetingStats.avgContributionScore || 0;
+          const prevCount = performance.meetingStats.totalMeetings - 1;
+          const newScore = attendee.contributionScore || 5;
+          const newAvg = (prevAvg * prevCount + newScore) / performance.meetingStats.totalMeetings;
 
-        await performance.save();
+          // ✅ Safe avg — never NaN
+          performance.meetingStats.avgContributionScore = isNaN(newAvg) ? 5 : newAvg;
+          await performance.save();
+        }
+      } catch (e) {
+        logger.warn(`Performance update failed: ${e.message}`);
       }
     }
 
-    // Mark as ready
+    // Sanitize all arrays before save
+    meeting.conclusions = (meeting.conclusions || []).filter(Boolean);
+    meeting.decisions = (meeting.decisions || []).filter(Boolean);
+    meeting.followUpTopics = (meeting.followUpTopics || []).filter(Boolean);
+    meeting.actionItems = (meeting.actionItems || []).filter(item => item && item.task);
+    meeting.attendeeContributions = (meeting.attendeeContributions || []).filter(Boolean);
+
     meeting.status = 'ready';
     await updateStep(meetingId, 'ready', 'done', 'Meeting processing complete', io);
     await meeting.save();
 
-    // Create notifications
     await Notification.create({
       user: meeting.host,
       type: 'meeting_ready',
@@ -371,37 +381,32 @@ async function processMeeting(job) {
       entityId: meeting._id
     });
 
-    // Cleanup
-    fs.unlinkSync(localAudioPath);
+    try { fs.unlinkSync(localAudioPath); } catch (e) {}
 
     logger.info(`Meeting ${meetingId} processing complete`);
 
   } catch (error) {
     logger.error(`Processing error for meeting ${meetingId}: ${error.message}`);
 
-    await Meeting.findByIdAndUpdate(meetingId, {
-      status: 'completed',
-      processingError: error.message,
-      $set: { 'processingSteps.$[elem].status': 'failed' }
-    }, {
-      arrayFilters: [{ 'elem.status': 'running' }]
-    });
+    try {
+      await Meeting.findByIdAndUpdate(meetingId, {
+        status: 'completed',
+        processingError: error.message,
+        $set: { 'processingSteps.$[elem].status': 'failed' }
+      }, {
+        arrayFilters: [{ 'elem.status': 'running' }]
+      });
+    } catch (updateError) {
+      logger.error(`Failed to update meeting status: ${updateError.message}`);
+    }
 
     throw error;
   }
 }
 
-function formatTime(seconds) {
-  const mins = Math.floor(seconds / 60);
-  const secs = Math.floor(seconds % 60);
-  return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-}
-
 // Create worker
 const worker = new Worker('meeting-processing', processMeeting, {
-  connection: {
-    url: process.env.REDIS_URL
-  },
+  connection: { url: process.env.REDIS_URL },
   concurrency: 2
 });
 

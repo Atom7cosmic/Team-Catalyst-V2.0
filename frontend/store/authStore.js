@@ -2,6 +2,23 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import api from '@/lib/axios';
 
+// Set cookies so Next.js middleware can read role server-side
+const setAuthCookies = (user) => {
+  if (typeof document === 'undefined') return;
+  const maxAge = 7 * 24 * 60 * 60;
+  document.cookie = `auth_role=${user.role}; path=/; max-age=${maxAge}; SameSite=Lax`;
+  document.cookie = `auth_role_level=${user.roleLevel}; path=/; max-age=${maxAge}; SameSite=Lax`;
+  document.cookie = `auth_is_admin=${user.isAdmin}; path=/; max-age=${maxAge}; SameSite=Lax`;
+  document.cookie = `accessToken=present; path=/; max-age=${maxAge}; SameSite=Lax`;
+};
+
+const clearAuthCookies = () => {
+  if (typeof document === 'undefined') return;
+  ['auth_role', 'auth_role_level', 'auth_is_admin', 'accessToken'].forEach(name => {
+    document.cookie = `${name}=; path=/; max-age=0`;
+  });
+};
+
 const useAuthStore = create(
   persist(
     (set, get) => ({
@@ -18,6 +35,9 @@ const useAuthStore = create(
 
           localStorage.setItem('accessToken', accessToken);
           localStorage.setItem('user', JSON.stringify(user));
+
+          // Set cookies for middleware
+          setAuthCookies(user);
 
           set({ user, isAuthenticated: true, isLoading: false });
           return { success: true };
@@ -38,6 +58,7 @@ const useAuthStore = create(
         }
         localStorage.removeItem('accessToken');
         localStorage.removeItem('user');
+        clearAuthCookies();
         set({ user: null, isAuthenticated: false, error: null });
       },
 
@@ -46,10 +67,14 @@ const useAuthStore = create(
           const response = await api.get('/auth/me');
           const { user } = response.data;
           localStorage.setItem('user', JSON.stringify(user));
+          // Always refresh cookies with latest user data
+          setAuthCookies(user);
           set({ user, isAuthenticated: true });
           return user;
         } catch (error) {
           console.error('Failed to refresh user:', error);
+          clearAuthCookies();
+          set({ user: null, isAuthenticated: false });
           return null;
         }
       },

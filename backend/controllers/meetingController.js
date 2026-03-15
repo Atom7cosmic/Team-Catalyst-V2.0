@@ -2,7 +2,7 @@ const Meeting = require('../models/Meeting');
 const { User, Notification, AuditLog, PromptTemplate } = require('../models');
 const { Queue } = require('bullmq');
 const { chromaClient } = require('../config/chroma');
-const { ragMeetingQA, findSimilarMeetings } = require('../ai/rag');
+const { queryMeetingRAG: ragMeetingQA, findSimilarMeetingsRAG: findSimilarMeetings } = require('../ai/rag');
 const { uploadFile, deleteFile } = require('../config/s3');
 const winston = require('winston');
 const path = require('path');
@@ -206,10 +206,24 @@ exports.getMeeting = async (req, res) => {
       });
     }
 
-    const hasAccess =
-      meeting.host._id.toString() === req.user.userId ||
-      meeting.attendees.some(a => a.user._id.toString() === req.user.userId) ||
-      req.user.isAdmin;
+    const hostId = meeting.host?._id?.toString() || meeting.host?.toString();
+    const isAttendee = meeting.attendees.some(a => {
+      const attendeeId = a.user?._id?.toString() || a.user?.toString();
+      return attendeeId === req.user.userId;
+    });
+
+    // Allow superiors of host to view meeting
+    const { getOrgTreeUsers } = require('../middleware');
+    let isSuperiorOfHost = false;
+    if (!isAttendee && !req.user.isAdmin && hostId !== req.user.userId) {
+      const orgTree = await getOrgTreeUsers(req.user.userId);
+      isSuperiorOfHost = orgTree.includes(hostId);
+    }
+
+    const hasAccess = hostId === req.user.userId ||
+      isAttendee ||
+      req.user.isAdmin ||
+      isSuperiorOfHost;
 
     if (!hasAccess) {
       return res.status(403).json({
@@ -261,7 +275,6 @@ exports.updateMeeting = async (req, res) => {
     }
 
     const oldValue = { ...meeting.toObject() };
-
     Object.assign(meeting, updates);
     await meeting.save();
 
@@ -322,9 +335,7 @@ exports.deleteMeeting = async (req, res) => {
 
     try {
       const collection = await chromaClient.getCollection({ name: 'meeting_transcripts' });
-      await collection.delete({
-        where: { meetingId: id }
-      });
+      await collection.delete({ where: { meetingId: id } });
     } catch (err) {
       logger.warn(`Failed to delete from ChromaDB: ${err.message}`);
     }
@@ -340,10 +351,7 @@ exports.deleteMeeting = async (req, res) => {
       ipAddress: req.ip
     });
 
-    res.json({
-      success: true,
-      message: 'Meeting deleted'
-    });
+    res.json({ success: true, message: 'Meeting deleted' });
   } catch (error) {
     logger.error(`Delete meeting error: ${error.message}`);
     res.status(500).json({
@@ -353,7 +361,7 @@ exports.deleteMeeting = async (req, res) => {
   }
 };
 
-// End meeting
+// End meeting — only host, triggers AI processing if recording exists
 exports.endMeeting = async (req, res) => {
   try {
     const { id } = req.params;
@@ -387,17 +395,54 @@ exports.endMeeting = async (req, res) => {
       }
     });
 
-    meeting.status = 'completed';
     meeting.endedAt = new Date();
 
+    // ✅ Safe duration — never NaN
     if (meeting.startedAt) {
-      meeting.actualDuration = Math.round(
-        (meeting.endedAt - meeting.startedAt) / 60000
-      );
+      const durationMs = meeting.endedAt - meeting.startedAt;
+      meeting.actualDuration = (!isNaN(durationMs) && durationMs > 0)
+        ? Math.round(durationMs / 60000)
+        : 0;
+    } else {
+      meeting.actualDuration = 0;
+    }
+
+    // If recording exists queue for AI processing, else mark completed
+    if (meeting.recordingUrl) {
+      meeting.status = 'processing';
+      meeting.processingSteps = [
+        { step: 'upload', status: 'done', timestamp: new Date() },
+        { step: 'transcription', status: 'pending' },
+        { step: 'diarization', status: 'pending' },
+        { step: 'analysis', status: 'pending' },
+        { step: 'embedding', status: 'pending' },
+        { step: 'ready', status: 'pending' }
+      ];
+    } else {
+      meeting.status = 'completed';
     }
 
     await meeting.save();
 
+    // Queue for AI processing if recording exists
+    if (meeting.recordingUrl && meetingQueue) {
+      try {
+        await meetingQueue.add('process-meeting', {
+          meetingId: id,
+          audioKey: meeting.recordingUrl
+        }, {
+          attempts: 3,
+          backoff: { type: 'exponential', delay: 5000 }
+        });
+        logger.info(`Meeting ${id} queued for AI processing after end`);
+      } catch (queueError) {
+        logger.warn(`Failed to queue meeting: ${queueError.message}`);
+        meeting.status = 'completed';
+        await meeting.save();
+      }
+    }
+
+    // Notify attendees
     const attendeeIds = meeting.attendees
       .map(a => a.user)
       .filter(uid => uid.toString() !== req.user.userId);
@@ -407,7 +452,9 @@ exports.endMeeting = async (req, res) => {
         user: uid,
         type: 'meeting_ended',
         title: `Meeting ended: ${meeting.name}`,
-        message: `The meeting "${meeting.name}" has been ended by the host.`,
+        message: meeting.recordingUrl
+          ? `"${meeting.name}" has ended. AI summary will be ready shortly.`
+          : `"${meeting.name}" has been ended by the host.`,
         link: `/meetings/${meeting._id}`,
         entityType: 'meeting',
         entityId: meeting._id
@@ -419,7 +466,8 @@ exports.endMeeting = async (req, res) => {
     if (io) {
       io.to(id).emit('meeting-ended', {
         meetingId: id,
-        endedAt: meeting.endedAt
+        endedAt: meeting.endedAt,
+        hasRecording: !!meeting.recordingUrl
       });
     }
 
@@ -428,14 +476,20 @@ exports.endMeeting = async (req, res) => {
       action: 'meeting_end',
       resourceType: 'meeting',
       resourceId: id,
-      newValue: { status: 'completed', endedAt: meeting.endedAt },
+      newValue: {
+        status: meeting.status,
+        endedAt: meeting.endedAt,
+        queuedForProcessing: !!meeting.recordingUrl
+      },
       success: true,
       ipAddress: req.ip
     });
 
     res.json({
       success: true,
-      message: 'Meeting ended successfully',
+      message: meeting.recordingUrl
+        ? 'Meeting ended and queued for AI processing'
+        : 'Meeting ended successfully',
       meeting
     });
   } catch (error) {
@@ -495,10 +549,7 @@ exports.uploadRecording = async (req, res) => {
         audioKey: key
       }, {
         attempts: 3,
-        backoff: {
-          type: 'exponential',
-          delay: 5000
-        }
+        backoff: { type: 'exponential', delay: 5000 }
       });
     }
 
@@ -519,13 +570,7 @@ exports.uploadRecording = async (req, res) => {
 // Manual audio upload
 exports.manualUpload = async (req, res) => {
   try {
-    const {
-      name,
-      scheduledDate,
-      domain,
-      agenda,
-      attendees
-    } = req.body;
+    const { name, scheduledDate, domain, agenda, attendees } = req.body;
 
     if (!req.file) {
       return res.status(400).json({
@@ -534,7 +579,10 @@ exports.manualUpload = async (req, res) => {
       });
     }
 
-    const allowedTypes = ['audio/mpeg', 'audio/wav', 'audio/wave', 'audio/x-wav', 'audio/mp4', 'audio/x-m4a'];
+    const allowedTypes = [
+      'audio/mpeg', 'audio/wav', 'audio/wave',
+      'audio/x-wav', 'audio/mp4', 'audio/x-m4a'
+    ];
     if (!allowedTypes.includes(req.file.mimetype)) {
       return res.status(400).json({
         success: false,
@@ -551,23 +599,23 @@ exports.manualUpload = async (req, res) => {
 
     const host = req.user.userId;
 
-    // Parse attendees — FormData sends it as a JSON string
     let parsedAttendees = [];
     try {
-      parsedAttendees = typeof attendees === 'string' ? JSON.parse(attendees) : (attendees || []);
+      parsedAttendees = typeof attendees === 'string'
+        ? JSON.parse(attendees)
+        : (attendees || []);
     } catch (e) {
       parsedAttendees = [];
     }
 
-    // Format attendees
-    const attendeeUsers = parsedAttendees.length > 0 ? await User.find({
-      _id: { $in: parsedAttendees.map(a => a.user || a) },
-      isActive: true
-    }) : [];
+    const attendeeUsers = parsedAttendees.length > 0
+      ? await User.find({
+          _id: { $in: parsedAttendees.map(a => a.user || a) },
+          isActive: true
+        })
+      : [];
 
-    const formattedAttendees = attendeeUsers.map(user => ({
-      user: user._id
-    }));
+    const formattedAttendees = attendeeUsers.map(user => ({ user: user._id }));
 
     if (!formattedAttendees.find(a => a.user.toString() === host)) {
       formattedAttendees.push({ user: host });
@@ -605,10 +653,7 @@ exports.manualUpload = async (req, res) => {
         audioKey: key
       }, {
         attempts: 3,
-        backoff: {
-          type: 'exponential',
-          delay: 5000
-        }
+        backoff: { type: 'exponential', delay: 5000 }
       });
     }
 
@@ -632,7 +677,7 @@ exports.getProcessingStatus = async (req, res) => {
     const { id } = req.params;
 
     const meeting = await Meeting.findById(id)
-      .select('status processingSteps processingError');
+      .select('status processingSteps processingError host attendees');
 
     if (!meeting) {
       return res.status(404).json({
@@ -641,9 +686,11 @@ exports.getProcessingStatus = async (req, res) => {
       });
     }
 
-    const hasAccess =
-      meeting.host?.toString() === req.user.userId ||
-      req.user.isAdmin;
+    const hostId = meeting.host?.toString();
+    const isAttendee = meeting.attendees?.some(
+      a => a.user?.toString() === req.user.userId
+    );
+    const hasAccess = hostId === req.user.userId || isAttendee || req.user.isAdmin;
 
     if (!hasAccess) {
       return res.status(403).json({
@@ -704,7 +751,7 @@ exports.meetingQA = async (req, res) => {
     if (meeting.status !== 'ready') {
       return res.status(400).json({
         success: false,
-        message: 'Meeting is still being processed'
+        message: 'Meeting is still being processed. Please wait until status is ready.'
       });
     }
 
@@ -752,10 +799,34 @@ exports.getSimilarMeetings = async (req, res) => {
 
     const similar = await findSimilarMeetings(id, 3);
 
-    res.json({
-      success: true,
-      similarMeetings: similar
-    });
+// Enrich with real meeting data from MongoDB
+const enriched = await Promise.all(
+  similar.map(async (s) => {
+    try {
+      const mtg = await Meeting.findById(s.meetingId)
+        .select('name domain scheduledDate attendees status');
+      if (mtg) {
+        return {
+          ...s,
+          _id: mtg._id,
+          name: mtg.name,
+          domain: mtg.domain,
+          scheduledDate: mtg.scheduledDate,
+          attendeeCount: mtg.attendees?.length || 0,
+          status: mtg.status
+        };
+      }
+      return s;
+    } catch (e) {
+      return s;
+    }
+  })
+);
+
+res.json({
+  success: true,
+  similarMeetings: enriched
+});
   } catch (error) {
     logger.error(`Get similar meetings error: ${error.message}`);
     res.status(500).json({
@@ -819,7 +890,7 @@ exports.scheduleFollowup = async (req, res) => {
       .map(a => ({
         user: a.user,
         type: 'follow_up_reminder',
-        title: `Follow-up meeting scheduled`,
+        title: 'Follow-up meeting scheduled',
         message: `A follow-up to "${parentMeeting.name}" has been scheduled`,
         link: `/meetings/${followUpMeeting._id}`,
         entityType: 'meeting',
@@ -933,10 +1004,7 @@ exports.leaveMeeting = async (req, res) => {
       ipAddress: req.ip
     });
 
-    res.json({
-      success: true,
-      message: 'Left meeting'
-    });
+    res.json({ success: true, message: 'Left meeting' });
   } catch (error) {
     logger.error(`Leave meeting error: ${error.message}`);
     res.status(500).json({
@@ -977,16 +1045,87 @@ exports.exportToPDF = async (req, res) => {
     res.json({
       success: true,
       message: 'PDF generation endpoint',
-      data: {
-        meeting,
-        generatedAt: new Date()
-      }
+      data: { meeting, generatedAt: new Date() }
     });
   } catch (error) {
     logger.error(`Export PDF error: ${error.message}`);
     res.status(500).json({
       success: false,
       message: 'Failed to export PDF'
+    });
+  }
+};
+
+// Cancel meeting — only host can cancel
+exports.cancelMeeting = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const meeting = await Meeting.findById(id);
+
+    if (!meeting) {
+      return res.status(404).json({
+        success: false,
+        message: 'Meeting not found'
+      });
+    }
+
+    const hostId = meeting.host?._id?.toString() || meeting.host?.toString();
+    if (hostId !== req.user.userId && !req.user.isAdmin) {
+      return res.status(403).json({
+        success: false,
+        message: 'Only the meeting host can cancel this meeting'
+      });
+    }
+
+    if (!['scheduled', 'live'].includes(meeting.status)) {
+      return res.status(400).json({
+        success: false,
+        message: `Cannot cancel a meeting with status: ${meeting.status}`
+      });
+    }
+
+    meeting.status = 'cancelled';
+    await meeting.save();
+
+    const notifications = meeting.attendees
+      .filter(a => a.user?.toString() !== req.user.userId)
+      .map(a => ({
+        user: a.user,
+        type: 'meeting_cancelled',
+        title: `Meeting cancelled: ${meeting.name}`,
+        message: `"${meeting.name}" has been cancelled by the host.`,
+        link: `/meetings/history`,
+        entityType: 'meeting',
+        entityId: meeting._id
+      }));
+
+    if (notifications.length > 0) {
+      await Notification.insertMany(notifications);
+    }
+
+    await AuditLog.create({
+      user: req.user.userId,
+      action: 'meeting_cancel',
+      resourceType: 'meeting',
+      resourceId: id,
+      success: true,
+      ipAddress: req.ip
+    });
+
+    const io = req.app.get('io');
+    if (io) {
+      io.to(id).emit('meeting-cancelled', {
+        meetingId: id,
+        message: 'This meeting has been cancelled by the host'
+      });
+    }
+
+    res.json({ success: true, message: 'Meeting cancelled', meeting });
+  } catch (error) {
+    logger.error(`Cancel meeting error: ${error.message}`);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to cancel meeting'
     });
   }
 };

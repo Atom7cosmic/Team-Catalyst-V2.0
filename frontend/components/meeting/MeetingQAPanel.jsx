@@ -119,11 +119,21 @@ export default function MeetingQAPanel({ meetingId, meetingName }) {
                       <div className="mt-3 pt-3 border-t border-slate-700/50">
                         <p className="text-xs text-slate-500 mb-2">Sources:</p>
                         <div className="flex flex-wrap gap-2">
-                          {message.sources.map((source, i) => (
-                            <Badge key={i} variant="outline" className="text-xs border-slate-700 text-muted-foreground">
-                              {source}
-                            </Badge>
-                          ))}
+                          {message.sources.map((source, i) => {
+                            const label = typeof source === 'string'
+                              ? source
+                              : source?.metadata?.chunkIndex !== undefined
+                                ? `Chunk ${source.metadata.chunkIndex + 1}`
+                                : `Source ${i + 1}`;
+                            const score = source?.relevanceScore
+                              ? ` · ${Math.round(source.relevanceScore * 100)}%`
+                              : '';
+                            return (
+                              <Badge key={i} variant="outline" className="text-xs border-slate-700 text-muted-foreground">
+                                {label}{score}
+                              </Badge>
+                            );
+                          })}
                         </div>
                       </div>
                     )}

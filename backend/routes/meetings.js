@@ -29,6 +29,7 @@ router.post('/', meetingController.createMeeting);
 router.get('/:id', meetingController.getMeeting);
 router.put('/:id', meetingController.updateMeeting);
 router.delete('/:id', meetingController.deleteMeeting);
+router.post('/:id/cancel', meetingController.cancelMeeting);
 
 // Room routes
 router.post('/:id/join', meetingController.joinMeeting);

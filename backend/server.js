@@ -227,6 +227,7 @@ io.on('connection', (socket) => {
   socket.on('chat-message', ({ meetingId, message }) => {
     io.to(meetingId).emit('chat-message', {
       userId: socket.userId,
+      userName: `${socket.user?.firstName || ''} ${socket.user?.lastName || ''}`.trim() || 'Participant',
       message,
       timestamp: new Date().toISOString()
     });

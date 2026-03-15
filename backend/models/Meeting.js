@@ -94,7 +94,7 @@ const meetingSchema = new mongoose.Schema({
   },
   estimatedDuration: {
     type: Number, // in minutes
-    required: true
+    default: 0
   },
   actualDuration: {
     type: Number, // in minutes
