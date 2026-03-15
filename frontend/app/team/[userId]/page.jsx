@@ -9,20 +9,13 @@ import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
-  ArrowLeft,
-  Mail,
-  Phone,
-  Calendar,
-  TrendingUp,
-  TrendingDown,
-  Minus,
-  Users,
-  Activity,
-  Award
+  ArrowLeft, Mail, Phone, Calendar,
+  TrendingUp, TrendingDown, Minus,
+  Users, Activity, Award
 } from 'lucide-react';
 import { format } from 'date-fns';
 import api from '@/lib/axios';
-import { CardSkeleton, ListSkeleton } from '@/components/shared/Skeleton';
+import { CardSkeleton } from '@/components/shared/Skeleton';
 import AttendanceHeatmap from '@/components/shared/AttendanceHeatmap';
 import RecommendationCard from '@/components/shared/RecommendationCard';
 import toast from 'react-hot-toast';
@@ -57,8 +50,11 @@ export default function UserDetailPage({ params }) {
     }
   };
 
-  const performance = user?.performance;
-  const trend = performance?.trend;
+  // ── Performance — handle both possible shapes from the API ──────────────────
+  const perf = user?.performance;
+  const currentScore = perf?.currentScore ?? perf?.score ?? 0;
+  const trend = perf?.trend ?? 'neutral';
+  const lastReviewDate = perf?.lastReviewDate ?? perf?.updatedAt ?? null;
 
   const getTrendIcon = () => {
     if (trend === 'improving') return <TrendingUp className="h-4 w-4 text-green-500" />;
@@ -72,6 +68,9 @@ export default function UserDetailPage({ params }) {
     return 'text-yellow-500';
   };
 
+  // Safely parse joinedAt / createdAt
+  const joinedDate = user?.joinedAt || user?.createdAt;
+
   if (isLoading) {
     return (
       <DashboardLayout>
@@ -82,10 +81,8 @@ export default function UserDetailPage({ params }) {
             </Button>
             <CardSkeleton className="flex-1" />
           </div>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-            <CardSkeleton />
-            <CardSkeleton />
-            <CardSkeleton />
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+            <CardSkeleton /><CardSkeleton /><CardSkeleton /><CardSkeleton />
           </div>
         </div>
       </DashboardLayout>
@@ -98,9 +95,7 @@ export default function UserDetailPage({ params }) {
         <div className="text-center py-12">
           <Users className="h-12 w-12 mx-auto mb-4 text-slate-500" />
           <p className="text-muted-foreground">User not found</p>
-          <Button className="mt-4" onClick={() => router.push('/team')}>
-            Back to Team
-          </Button>
+          <Button className="mt-4" onClick={() => router.push('/team')}>Back to Team</Button>
         </div>
       </DashboardLayout>
     );
@@ -109,6 +104,7 @@ export default function UserDetailPage({ params }) {
   return (
     <DashboardLayout>
       <div className="space-y-6">
+
         {/* Header */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div className="flex items-center gap-4">
@@ -116,26 +112,26 @@ export default function UserDetailPage({ params }) {
               <ArrowLeft className="h-5 w-5" />
             </Button>
             <div className="flex items-center gap-4">
-              <div className="w-16 h-16 rounded-full bg-slate-700 flex items-center justify-center text-2xl text-slate-300">
+              <div className="w-16 h-16 rounded-full bg-slate-700 flex items-center justify-center text-2xl text-slate-300 font-semibold">
                 {user.firstName?.[0]}{user.lastName?.[0]}
               </div>
               <div>
                 <h1 className="text-2xl font-bold">{user.firstName} {user.lastName}</h1>
                 <div className="flex items-center gap-2 mt-1">
-                  <Badge variant="secondary" className="bg-muted text-slate-300">
-                    {user.role}
-                  </Badge>
+                  <Badge variant="secondary" className="bg-muted text-slate-300">{user.role}</Badge>
                   <span className="text-muted-foreground text-sm">Level {user.roleLevel}</span>
                 </div>
               </div>
             </div>
           </div>
-          <div className="flex gap-2">
-            <Button variant="outline" className="border-slate-700" onClick={() => window.location.href = `mailto:${user.email}`}>
-              <Mail className="mr-2 h-4 w-4" />
-              Send Email
-            </Button>
-          </div>
+          <Button
+            variant="outline"
+            className="border-slate-700"
+            onClick={() => window.location.href = `mailto:${user.email}`}
+          >
+            <Mail className="mr-2 h-4 w-4" />
+            Send Email
+          </Button>
         </div>
 
         {/* Stats Grid */}
@@ -146,10 +142,8 @@ export default function UserDetailPage({ params }) {
               <div>
                 <p className="text-sm text-slate-500">Performance</p>
                 <div className="flex items-center gap-2">
-                  <p className="font-medium text-lg">{performance?.currentScore || 0}/100</p>
-                  <div className={`flex items-center ${getTrendColor()}`}>
-                    {getTrendIcon()}
-                  </div>
+                  <p className="font-medium text-lg">{currentScore}/100</p>
+                  <div className={getTrendColor()}>{getTrendIcon()}</div>
                 </div>
               </div>
             </CardContent>
@@ -170,7 +164,9 @@ export default function UserDetailPage({ params }) {
               <Calendar className="h-5 w-5 text-muted-foreground" />
               <div>
                 <p className="text-sm text-slate-500">Joined</p>
-                <p className="font-medium">{format(new Date(user.joinedAt), 'MMM yyyy')}</p>
+                <p className="font-medium">
+                  {joinedDate ? format(new Date(joinedDate), 'MMM yyyy') : 'N/A'}
+                </p>
               </div>
             </CardContent>
           </Card>
@@ -180,7 +176,10 @@ export default function UserDetailPage({ params }) {
               <Award className="h-5 w-5 text-muted-foreground" />
               <div>
                 <p className="text-sm text-slate-500">Status</p>
-                <Badge className={user.isActive ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}>
+                <Badge className={user.isActive
+                  ? 'bg-green-500/20 text-green-400'
+                  : 'bg-red-500/20 text-red-400'
+                }>
                   {user.isActive ? 'Active' : 'Inactive'}
                 </Badge>
               </div>
@@ -191,41 +190,54 @@ export default function UserDetailPage({ params }) {
         <Tabs defaultValue="overview" className="space-y-4">
           <TabsList className="bg-card border border-muted">
             <TabsTrigger value="overview">Overview</TabsTrigger>
+            <TabsTrigger value="attendance">Attendance</TabsTrigger>
             <TabsTrigger value="team">Team</TabsTrigger>
             <TabsTrigger value="recommendations">Recommendations</TabsTrigger>
           </TabsList>
 
+          {/* ── Overview tab ── */}
           <TabsContent value="overview" className="space-y-4">
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+
               <Card className="bg-card border-muted">
-                <CardHeader>
-                  <CardTitle>Performance</CardTitle>
-                </CardHeader>
+                <CardHeader><CardTitle>Performance</CardTitle></CardHeader>
                 <CardContent className="space-y-4">
                   <div>
                     <div className="flex justify-between mb-2">
                       <span className="text-muted-foreground">Current Score</span>
-                      <span className="font-medium">{performance?.currentScore || 0}/100</span>
+                      <span className="font-medium">{currentScore}/100</span>
                     </div>
-                    <Progress value={performance?.currentScore || 0} className="h-2" />
+                    <Progress value={currentScore} className="h-2" />
                   </div>
-                  <div className="grid grid-cols-2 gap-4 pt-4">
+                  <div className="grid grid-cols-2 gap-4 pt-2">
                     <div className="p-3 bg-muted/50 rounded-lg">
                       <p className="text-sm text-slate-500">Trend</p>
-                      <p className={`font-medium capitalize ${getTrendColor()}`}>{trend || 'neutral'}</p>
+                      <p className={`font-medium capitalize ${getTrendColor()}`}>{trend}</p>
                     </div>
                     <div className="p-3 bg-muted/50 rounded-lg">
                       <p className="text-sm text-slate-500">Last Review</p>
-                      <p className="font-medium">{performance?.lastReviewDate ? format(new Date(performance.lastReviewDate), 'MMM d') : 'N/A'}</p>
+                      <p className="font-medium">
+                        {lastReviewDate ? format(new Date(lastReviewDate), 'MMM d') : 'N/A'}
+                      </p>
                     </div>
+                    {perf?.taskCompletionRate !== undefined && (
+                      <div className="p-3 bg-muted/50 rounded-lg">
+                        <p className="text-sm text-slate-500">Task Completion</p>
+                        <p className="font-medium">{Math.round((perf.taskCompletionRate || 0) * 100)}%</p>
+                      </div>
+                    )}
+                    {perf?.deadlineAdherenceRate !== undefined && (
+                      <div className="p-3 bg-muted/50 rounded-lg">
+                        <p className="text-sm text-slate-500">Deadline Adherence</p>
+                        <p className="font-medium">{Math.round((perf.deadlineAdherenceRate || 0) * 100)}%</p>
+                      </div>
+                    )}
                   </div>
                 </CardContent>
               </Card>
 
               <Card className="bg-card border-muted">
-                <CardHeader>
-                  <CardTitle>Contact Info</CardTitle>
-                </CardHeader>
+                <CardHeader><CardTitle>Contact Info</CardTitle></CardHeader>
                 <CardContent className="space-y-4">
                   <div className="flex items-center gap-3">
                     <Mail className="h-4 w-4 text-muted-foreground" />
@@ -243,38 +255,50 @@ export default function UserDetailPage({ params }) {
                       <span>{user.timezone}</span>
                     </div>
                   )}
+                  {user.superior && (
+                    <div className="flex items-center gap-3">
+                      <Users className="h-4 w-4 text-muted-foreground" />
+                      <div>
+                        <p className="text-sm text-slate-500">Reports to</p>
+                        <p className="font-medium">
+                          {user.superior?.firstName} {user.superior?.lastName}
+                        </p>
+                      </div>
+                    </div>
+                  )}
                 </CardContent>
               </Card>
             </div>
+          </TabsContent>
 
+          {/* ── Attendance tab ── */}
+          <TabsContent value="attendance">
             <Card className="bg-card border-muted">
-              <CardHeader>
-                <CardTitle>Attendance</CardTitle>
-              </CardHeader>
+              <CardHeader><CardTitle>Attendance</CardTitle></CardHeader>
               <CardContent>
-                <AttendanceHeatmap />
+                {/* Pass userId so heatmap fetches its own data per month */}
+                <AttendanceHeatmap userId={params.userId} />
               </CardContent>
             </Card>
           </TabsContent>
 
+          {/* ── Team tab ── */}
           <TabsContent value="team" className="space-y-4">
             <Card className="bg-card border-muted">
-              <CardHeader>
-                <CardTitle>Direct Reports</CardTitle>
-              </CardHeader>
+              <CardHeader><CardTitle>Direct Reports</CardTitle></CardHeader>
               <CardContent>
-                {team?.directReports?.length === 0 ? (
+                {!team?.directReports?.length ? (
                   <p className="text-slate-500 text-center py-8">No direct reports</p>
                 ) : (
                   <div className="space-y-3">
-                    {team?.directReports?.map((report) => (
+                    {team.directReports.map((report) => (
                       <div
                         key={report._id}
                         className="flex items-center justify-between p-3 bg-muted/50 rounded-lg hover:bg-muted cursor-pointer transition-colors"
                         onClick={() => router.push(`/team/${report._id}`)}
                       >
                         <div className="flex items-center gap-3">
-                          <div className="w-10 h-10 rounded-full bg-slate-700 flex items-center justify-center text-slate-300">
+                          <div className="w-10 h-10 rounded-full bg-slate-700 flex items-center justify-center text-slate-300 font-medium">
                             {report.firstName?.[0]}{report.lastName?.[0]}
                           </div>
                           <div>
@@ -282,7 +306,10 @@ export default function UserDetailPage({ params }) {
                             <p className="text-sm text-muted-foreground">{report.role}</p>
                           </div>
                         </div>
-                        <Badge className={report.isActive ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}>
+                        <Badge className={report.isActive
+                          ? 'bg-green-500/20 text-green-400'
+                          : 'bg-red-500/20 text-red-400'
+                        }>
                           {report.isActive ? 'Active' : 'Inactive'}
                         </Badge>
                       </div>
@@ -293,11 +320,10 @@ export default function UserDetailPage({ params }) {
             </Card>
           </TabsContent>
 
+          {/* ── Recommendations tab ── */}
           <TabsContent value="recommendations" className="space-y-4">
             <Card className="bg-card border-muted">
-              <CardHeader>
-                <CardTitle>Recommendations</CardTitle>
-              </CardHeader>
+              <CardHeader><CardTitle>Recommendations</CardTitle></CardHeader>
               <CardContent>
                 {recommendations.length === 0 ? (
                   <p className="text-slate-500 text-center py-8">No recommendations yet</p>

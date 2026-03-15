@@ -18,24 +18,32 @@ import {
   X,
   Shield,
   ChevronDown,
+  Database,
+  FileText,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import toast from 'react-hot-toast'
 
-const navigation = [
-  { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
-  { name: 'Team', href: '/team', icon: Users },
-  { name: 'Meetings', href: '/meetings/history', icon: Calendar },
-  { name: 'Tasks', href: '/tasks', icon: CheckSquare },
-  { name: 'Sprints', href: '/sprints', icon: BarChart3 },
-  { name: 'Recommendations', href: '/recommendations', icon: Users },
-  { name: 'Notifications', href: '/notifications', icon: Bell },
+// ── Nav for regular users (superiors + subordinates) ──────────────────────────
+const userNavigation = [
+  { name: 'Dashboard',       href: '/dashboard',         icon: LayoutDashboard },
+  { name: 'Team',            href: '/team',               icon: Users },
+  { name: 'Meetings',        href: '/meetings/history',   icon: Calendar },
+  { name: 'Tasks',           href: '/tasks',              icon: CheckSquare },
+  { name: 'Sprints',         href: '/sprints',            icon: BarChart3 },
+  { name: 'Recommendations', href: '/recommendations',    icon: Users },
+  { name: 'Notifications',   href: '/notifications',      icon: Bell },
 ]
 
+// ── Nav for admin only ────────────────────────────────────────────────────────
 const adminNavigation = [
-  { name: 'Admin Users', href: '/admin/users', icon: Shield },
-  { name: 'System', href: '/admin/system', icon: Settings },
+  { name: 'Dashboard',       href: '/dashboard',          icon: LayoutDashboard },
+  { name: 'Admin Users',     href: '/admin/users',        icon: Users },
+  { name: 'Prompt Templates',href: '/admin/prompts',      icon: FileText },
+  { name: 'System',          href: '/admin/system',       icon: Database },
+  { name: 'Audit Logs',      href: '/audit',              icon: Shield },
+  { name: 'Notifications',   href: '/notifications',      icon: Bell },
 ]
 
 export default function DashboardLayout({ children }) {
@@ -52,11 +60,28 @@ export default function DashboardLayout({ children }) {
     window.location.href = '/login'
   }
 
-  const navItems = [
-    ...navigation,
-    ...(isAdmin ? [{ name: 'Audit Logs', href: '/audit', icon: Shield }] : []),
-    ...(isAdmin ? adminNavigation : []),
-  ]
+  // Admin gets a completely different nav — no team/meetings/tasks/sprints/recommendations
+  const navItems = isAdmin ? adminNavigation : userNavigation
+
+  const SidebarNav = ({ onClose }) => (
+    <nav className="flex-1 px-4 py-4 space-y-1">
+      {navItems.map((item) => (
+        <Link
+          key={item.name}
+          href={item.href}
+          onClick={onClose}
+          className={`flex items-center gap-3 px-4 py-3 rounded-lg transition-colors ${
+            pathname === item.href
+              ? 'bg-primary text-primary-foreground'
+              : 'text-muted-foreground hover:bg-accent hover:text-foreground'
+          }`}
+        >
+          <item.icon className="h-5 w-5" />
+          {item.name}
+        </Link>
+      ))}
+    </nav>
+  )
 
   return (
     <div className="min-h-screen bg-background text-foreground">
@@ -68,67 +93,28 @@ export default function DashboardLayout({ children }) {
             className="fixed inset-0 bg-black/50"
             onClick={() => setSidebarOpen(false)}
           />
-
-          <div className="fixed inset-y-0 left-0 w-64 bg-card border-r border-border">
-
+          <div className="fixed inset-y-0 left-0 w-64 bg-card border-r border-border flex flex-col">
             <div className="flex h-16 items-center justify-between px-4 border-b border-border">
               <Link href="/dashboard" className="text-xl font-bold gradient-text">
                 OrgOS
               </Link>
-
               <Button variant="ghost" size="icon" onClick={() => setSidebarOpen(false)}>
                 <X className="h-6 w-6" />
               </Button>
             </div>
-
-            <nav className="p-4 space-y-1">
-              {navItems.map((item) => (
-                <Link
-                  key={item.name}
-                  href={item.href}
-                  onClick={() => setSidebarOpen(false)}
-                  className={`flex items-center gap-3 px-4 py-3 rounded-lg transition-colors ${
-                    pathname === item.href
-                      ? 'bg-primary text-primary-foreground'
-                      : 'text-muted-foreground hover:bg-accent hover:text-foreground'
-                  }`}
-                >
-                  <item.icon className="h-5 w-5" />
-                  {item.name}
-                </Link>
-              ))}
-            </nav>
-
+            <SidebarNav onClose={() => setSidebarOpen(false)} />
           </div>
         </div>
       )}
 
       {/* Desktop Sidebar */}
       <div className="hidden lg:fixed lg:inset-y-0 lg:flex lg:w-64 lg:flex-col bg-card border-r border-border">
-
         <div className="flex h-16 items-center px-6 border-b border-border">
           <Link href="/dashboard" className="text-xl font-bold gradient-text">
             OrgOS
           </Link>
         </div>
-
-        <nav className="flex-1 px-4 py-4 space-y-1">
-          {navItems.map((item) => (
-            <Link
-              key={item.name}
-              href={item.href}
-              className={`flex items-center gap-3 px-4 py-3 rounded-lg transition-colors ${
-                pathname === item.href
-                  ? 'bg-primary text-primary-foreground'
-                  : 'text-muted-foreground hover:bg-accent hover:text-foreground'
-              }`}
-            >
-              <item.icon className="h-5 w-5" />
-              {item.name}
-            </Link>
-          ))}
-        </nav>
-
+        <SidebarNav onClose={() => {}} />
       </div>
 
       {/* Main Content */}
@@ -136,7 +122,6 @@ export default function DashboardLayout({ children }) {
 
         {/* Header */}
         <header className="sticky top-0 z-40 bg-background/80 backdrop-blur border-b border-border">
-
           <div className="flex h-16 items-center justify-between px-4 lg:px-8">
 
             <div className="lg:hidden">
@@ -145,8 +130,7 @@ export default function DashboardLayout({ children }) {
               </Button>
             </div>
 
-            <div className="flex items-center gap-4">
-
+            <div className="flex items-center gap-4 ml-auto">
               <Link href="/notifications" className="relative">
                 <Button variant="ghost" size="icon">
                   <Bell className="h-5 w-5" />
@@ -157,7 +141,6 @@ export default function DashboardLayout({ children }) {
               </Link>
 
               <div className="relative">
-
                 <button
                   onClick={() => setUserMenuOpen(!userMenuOpen)}
                   className="flex items-center gap-3"
@@ -167,11 +150,9 @@ export default function DashboardLayout({ children }) {
                       {user?.firstName?.[0]}{user?.lastName?.[0]}
                     </AvatarFallback>
                   </Avatar>
-
                   <span className="hidden md:block">
                     {user?.firstName} {user?.lastName}
                   </span>
-
                   <ChevronDown className="h-4 w-4" />
                 </button>
 
@@ -181,9 +162,7 @@ export default function DashboardLayout({ children }) {
                       className="fixed inset-0 z-40"
                       onClick={() => setUserMenuOpen(false)}
                     />
-
                     <div className="absolute right-0 top-full mt-2 w-48 rounded-lg bg-card border border-border shadow-lg z-50 py-1">
-
                       <Link
                         href="/settings"
                         onClick={() => setUserMenuOpen(false)}
@@ -192,9 +171,7 @@ export default function DashboardLayout({ children }) {
                         <Settings className="h-4 w-4" />
                         Settings
                       </Link>
-
                       <hr className="my-1 border-border" />
-
                       <button
                         onClick={handleLogout}
                         className="w-full flex items-center gap-2 px-4 py-2 text-sm text-red-500 hover:bg-accent"
@@ -202,16 +179,13 @@ export default function DashboardLayout({ children }) {
                         <LogOut className="h-4 w-4" />
                         Logout
                       </button>
-
                     </div>
                   </>
                 )}
-
               </div>
-
             </div>
-          </div>
 
+          </div>
         </header>
 
         <main className="p-6">

@@ -43,7 +43,7 @@ exports.getAttendance = async (req, res) => {
 
     // Calculate stats
     const stats = await Attendance.aggregate([
-      { $match: { user: require('mongoose').Types.ObjectId(targetUserId) } },
+      { $match: { user: new (require('mongoose').Types.ObjectId)(targetUserId) } },
       {
         $group: {
           _id: null,

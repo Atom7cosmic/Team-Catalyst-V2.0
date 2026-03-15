@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
 import { AuthGuard } from '@/components/guards/RouteGuard';
 import DashboardLayout from '@/components/layout/DashboardLayout';
+import AdminDashboard from '@/components/dashboard/AdminDashboard';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
 import { Badge } from '@/components/ui/badge';
@@ -43,6 +44,20 @@ function DashboardContent() {
     );
   }
 
+  // ── ADMIN gets their own dashboard ──────────────────────────────────────────
+  if (user?.isAdmin) {
+    return (
+      <DashboardLayout>
+        <div className="space-y-2 mb-6">
+          <h1 className="text-3xl font-bold">Welcome back, {user?.firstName}</h1>
+          <p className="text-muted-foreground">Admin · Administrator</p>
+        </div>
+        <AdminDashboard />
+      </DashboardLayout>
+    );
+  }
+  // ────────────────────────────────────────────────────────────────────────────
+
   const performance = dashboardData?.performance;
   const trend = performance?.trend;
 
@@ -64,7 +79,7 @@ function DashboardContent() {
         <div>
           <h1 className="text-3xl font-bold">Welcome back, {user?.firstName}</h1>
           <p className="text-muted-foreground">
-            {user?.role} · {user?.isAdmin ? 'Administrator' : user?.roleLevel <= 5 ? 'Superior' : 'Team Member'}
+            {user?.role} · {user?.roleLevel <= 5 ? 'Superior' : 'Team Member'}
           </p>
         </div>
 

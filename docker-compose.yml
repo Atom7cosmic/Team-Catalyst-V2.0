@@ -30,7 +30,6 @@ services:
     environment:
       - NODE_ENV=development
       - PORT=5001
-      - MONGODB_URI=${MONGODB_URI:-mongodb://mongo:27017/orgos}
       - REDIS_URL=${REDIS_URL:-redis://redis:6379}
       - CHROMA_HOST=${CHROMA_HOST:-chroma}
       - CHROMA_PORT=${CHROMA_PORT:-8000}
@@ -40,18 +39,8 @@ services:
       - ./backend/models/whisper:/app/models/whisper
       - whisper-cache:/app/whisper-cache
     depends_on:
-      - mongo
       - redis
       - chroma
-    networks:
-      - orgos-network
-
-  mongo:
-    image: mongo:7
-    ports:
-      - "27017:27017"
-    volumes:
-      - mongo_data:/data/db
     networks:
       - orgos-network
 
@@ -78,7 +67,6 @@ services:
       - orgos-network
 
 volumes:
-  mongo_data:
   redis_data:
   chroma_data:
   whisper-cache:

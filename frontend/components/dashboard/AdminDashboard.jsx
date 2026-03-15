@@ -6,36 +6,17 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import {
-  Users,
-  Calendar,
-  CheckSquare,
-  Settings,
-  Shield,
-  TrendingUp,
-  ArrowRight,
-  Activity,
-  Database,
-  Server,
-  Cpu,
-  Memory,
-  HardDrive
+  Users, Settings, Shield, TrendingUp,
+  ArrowRight, Activity, Database,
+  AlertTriangle, CheckCircle, UserPlus
 } from 'lucide-react';
 import { format } from 'date-fns';
 import api from '@/lib/axios';
-import { CardSkeleton, TableSkeleton } from '@/components/shared/Skeleton';
+import { CardSkeleton } from '@/components/shared/Skeleton';
 import {
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-  PieChart,
-  Pie,
-  Cell
+  BarChart, Bar, XAxis, YAxis, CartesianGrid,
+  Tooltip, ResponsiveContainer
 } from 'recharts';
-import toast from 'react-hot-toast';
 
 export default function AdminDashboard() {
   const router = useRouter();
@@ -68,49 +49,41 @@ export default function AdminDashboard() {
     }
   };
 
-  // Mock system metrics
   const systemMetrics = [
-    { name: 'CPU', value: 45, color: '#3b82f6' },
-    { name: 'Memory', value: 62, color: '#10b981' },
-    { name: 'Storage', value: 78, color: '#f59e0b' },
+    { name: 'CPU',     value: stats?.cpu     ?? 45, color: '#3b82f6' },
+    { name: 'Memory',  value: stats?.memory  ?? 62, color: '#10b981' },
+    { name: 'Storage', value: stats?.storage ?? 78, color: '#f59e0b' },
   ];
 
-  // Mock user growth data
-  const userGrowth = [
-    { month: 'Jan', users: 45 },
-    { month: 'Feb', users: 52 },
-    { month: 'Mar', users: 61 },
-    { month: 'Apr', users: 75 },
-    { month: 'May', users: 89 },
-    { month: 'Jun', users: 102 },
+  const userRoleData = stats?.usersByRole || [
+    { role: 'Engineers', count: 0 },
+    { role: 'Managers',  count: 0 },
+    { role: 'Leads',     count: 0 },
+    { role: 'QA',        count: 0 },
   ];
 
   const getActionColor = (action) => {
     if (action?.includes('delete') || action?.includes('remove')) return 'bg-red-500/20 text-red-400';
-    if (action?.includes('create') || action?.includes('add')) return 'bg-green-500/20 text-green-400';
-    if (action?.includes('update') || action?.includes('edit')) return 'bg-blue-500/20 text-blue-400';
+    if (action?.includes('create') || action?.includes('add'))    return 'bg-green-500/20 text-green-400';
+    if (action?.includes('update') || action?.includes('edit'))   return 'bg-blue-500/20 text-blue-400';
     return 'bg-slate-500/20 text-muted-foreground';
   };
 
   const quickActions = [
-    { label: 'Manage Users', icon: Users, href: '/admin/users', color: 'bg-blue-500/20 text-blue-400' },
-    { label: 'Prompt Templates', icon: Settings, href: '/admin/prompts', color: 'bg-green-500/20 text-green-400' },
-    { label: 'System Stats', icon: Database, href: '/admin/system', color: 'bg-purple-500/20 text-purple-400' },
-    { label: 'Audit Logs', icon: Shield, href: '/audit', color: 'bg-yellow-500/20 text-yellow-400' },
+    { label: 'Manage Users',      icon: Users,    href: '/admin/users',   color: 'bg-blue-500/20 text-blue-400' },
+    { label: 'Prompt Templates',  icon: Settings, href: '/admin/prompts', color: 'bg-green-500/20 text-green-400' },
+    { label: 'System Stats',      icon: Database, href: '/admin/system',  color: 'bg-purple-500/20 text-purple-400' },
+    { label: 'Audit Logs',        icon: Shield,   href: '/audit',         color: 'bg-yellow-500/20 text-yellow-400' },
   ];
 
   if (isLoading) {
     return (
       <div className="space-y-6">
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-          <CardSkeleton />
-          <CardSkeleton />
-          <CardSkeleton />
-          <CardSkeleton />
+          <CardSkeleton /><CardSkeleton /><CardSkeleton /><CardSkeleton />
         </div>
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          <CardSkeleton />
-          <CardSkeleton />
+          <CardSkeleton /><CardSkeleton />
         </div>
       </div>
     );
@@ -118,83 +91,87 @@ export default function AdminDashboard() {
 
   return (
     <div className="space-y-6">
-      {/* Stats Row */}
+
+      {/* ── Top Stats ── */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
         <Card className="bg-card border-muted">
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">Total Users</CardTitle>
+            <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
+              <Users className="h-4 w-4" /> Total Users
+            </CardTitle>
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold text-slate-100">{stats?.users || 0}</div>
-            <p className="text-sm text-muted-foreground">
-              {stats?.activeUsers || 0} active
-            </p>
+            <p className="text-sm text-muted-foreground">{stats?.activeUsers || 0} active</p>
           </CardContent>
         </Card>
 
         <Card className="bg-card border-muted">
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">Total Meetings</CardTitle>
+            <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
+              <UserPlus className="h-4 w-4" /> New This Month
+            </CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold text-slate-100">{stats?.totalMeetings || 0}</div>
-            <p className="text-sm text-muted-foreground">
-              {stats?.processingMeetings || 0} processing
-            </p>
+            <div className="text-2xl font-bold text-green-400">{stats?.newUsersThisMonth || 0}</div>
+            <p className="text-sm text-muted-foreground">Users onboarded</p>
           </CardContent>
         </Card>
 
         <Card className="bg-card border-muted">
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">Total Tasks</CardTitle>
+            <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
+              <AlertTriangle className="h-4 w-4 text-red-400" /> At Risk
+            </CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold text-slate-100">{stats?.totalTasks || 0}</div>
-            <p className="text-sm text-muted-foreground">Across all teams</p>
+            <div className="text-2xl font-bold text-red-400">{stats?.atRiskUsers || 0}</div>
+            <p className="text-sm text-muted-foreground">Employees flagged</p>
           </CardContent>
         </Card>
 
         <Card className="bg-card border-muted">
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">Admin Users</CardTitle>
+            <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
+              <Shield className="h-4 w-4" /> Admin Users
+            </CardTitle>
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold text-slate-100">{stats?.adminUsers || 0}</div>
-            <p className="text-sm text-muted-foreground">
-              {stats?.newUsersThisMonth || 0} new this month
-            </p>
+            <p className="text-sm text-muted-foreground">System admins</p>
           </CardContent>
         </Card>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* User Growth Chart */}
+
+        {/* ── User Distribution Chart ── */}
         <Card className="bg-card border-muted lg:col-span-2">
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <TrendingUp className="h-5 w-5" />
-              User Growth
+              Users by Role
             </CardTitle>
           </CardHeader>
           <CardContent>
             <div className="h-[250px]">
               <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={userGrowth}>
+                <BarChart data={userRoleData}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-                  <XAxis dataKey="month" stroke="#64748b" />
+                  <XAxis dataKey="role" stroke="#64748b" tick={{ fontSize: 12 }} />
                   <YAxis stroke="#64748b" />
                   <Tooltip
                     contentStyle={{ backgroundColor: '#1e293b', borderColor: '#334155' }}
                     labelStyle={{ color: '#94a3b8' }}
                   />
-                  <Bar dataKey="users" fill="#3b82f6" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="count" fill="#6C63FF" radius={[4, 4, 0, 0]} />
                 </BarChart>
               </ResponsiveContainer>
             </div>
           </CardContent>
         </Card>
 
-        {/* System Health */}
+        {/* ── System Health ── */}
         <Card className="bg-card border-muted">
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
@@ -208,7 +185,7 @@ export default function AdminDashboard() {
                 <div key={metric.name}>
                   <div className="flex items-center justify-between mb-1">
                     <span className="text-sm text-muted-foreground">{metric.name}</span>
-                    <span className="text-sm font-medium text-foreground">{metric.value}%</span>
+                    <span className="text-sm font-medium">{metric.value}%</span>
                   </div>
                   <div className="h-2 bg-muted rounded-full overflow-hidden">
                     <div
@@ -219,12 +196,31 @@ export default function AdminDashboard() {
                 </div>
               ))}
             </div>
+
+            {/* Service status */}
+            <div className="mt-6 space-y-2">
+              <p className="text-xs text-muted-foreground font-medium uppercase tracking-wider mb-3">Services</p>
+              {[
+                { label: 'MongoDB',  ok: stats?.mongoConnected  ?? true },
+                { label: 'Redis',    ok: stats?.redisConnected  ?? true },
+                { label: 'ChromaDB', ok: stats?.chromaConnected ?? true },
+              ].map(({ label, ok }) => (
+                <div key={label} className="flex items-center justify-between">
+                  <span className="text-sm text-muted-foreground">{label}</span>
+                  <div className={`flex items-center gap-1 text-xs font-medium ${ok ? 'text-green-400' : 'text-red-400'}`}>
+                    <div className={`w-2 h-2 rounded-full ${ok ? 'bg-green-400' : 'bg-red-400'}`} />
+                    {ok ? 'Online' : 'Offline'}
+                  </div>
+                </div>
+              ))}
+            </div>
           </CardContent>
         </Card>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Quick Actions */}
+
+        {/* ── Quick Actions ── */}
         <Card className="bg-card border-muted">
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
@@ -244,14 +240,14 @@ export default function AdminDashboard() {
                   <div className={`p-2 rounded-lg ${action.color}`}>
                     <action.icon className="h-5 w-5" />
                   </div>
-                  <span className="text-xs">{action.label}</span>
+                  <span className="text-xs text-center">{action.label}</span>
                 </Button>
               ))}
             </div>
           </CardContent>
         </Card>
 
-        {/* Recent Audit Logs */}
+        {/* ── Recent Audit Logs ── */}
         <Card className="bg-card border-muted lg:col-span-2">
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
@@ -287,7 +283,10 @@ export default function AdminDashboard() {
                       <p className="text-xs text-muted-foreground">
                         {format(new Date(log.createdAt), 'MMM d, HH:mm')}
                       </p>
-                      <Badge className={log.success ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}>
+                      <Badge className={log.success
+                        ? 'bg-green-500/20 text-green-400'
+                        : 'bg-red-500/20 text-red-400'
+                      }>
                         {log.success ? 'Success' : 'Failed'}
                       </Badge>
                     </div>

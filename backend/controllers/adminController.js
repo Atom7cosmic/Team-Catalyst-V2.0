@@ -1,4 +1,4 @@
-const { User, PromptTemplate, AuditLog } = require('../models');
+const { User, PromptTemplate, AuditLog, Recommendation } = require('../models');
 const winston = require('winston');
 
 const logger = winston.createLogger({
@@ -47,10 +47,7 @@ exports.getAllUsers = async (req, res) => {
     });
   } catch (error) {
     logger.error(`Admin get users error: ${error.message}`);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to get users'
-    });
+    res.status(500).json({ success: false, message: 'Failed to get users' });
   }
 };
 
@@ -60,17 +57,10 @@ exports.toggleUserStatus = async (req, res) => {
     const { id } = req.params;
     const { isActive } = req.body;
 
-    const user = await User.findByIdAndUpdate(
-      id,
-      { isActive },
-      { new: true }
-    );
+    const user = await User.findByIdAndUpdate(id, { isActive }, { new: true });
 
     if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'User not found'
-      });
+      return res.status(404).json({ success: false, message: 'User not found' });
     }
 
     res.json({
@@ -80,10 +70,7 @@ exports.toggleUserStatus = async (req, res) => {
     });
   } catch (error) {
     logger.error(`Toggle user status error: ${error.message}`);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to update user status'
-    });
+    res.status(500).json({ success: false, message: 'Failed to update user status' });
   }
 };
 
@@ -94,16 +81,10 @@ exports.getPromptTemplates = async (req, res) => {
       .populate('createdBy', 'firstName lastName')
       .sort({ domain: 1 });
 
-    res.json({
-      success: true,
-      templates
-    });
+    res.json({ success: true, templates });
   } catch (error) {
     logger.error(`Get prompt templates error: ${error.message}`);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to get prompt templates'
-    });
+    res.status(500).json({ success: false, message: 'Failed to get prompt templates' });
   }
 };
 
@@ -112,20 +93,12 @@ exports.updatePromptTemplate = async (req, res) => {
   try {
     const { id } = req.params;
     const updates = req.body;
-
     updates.updatedBy = req.user.userId;
 
-    const template = await PromptTemplate.findByIdAndUpdate(
-      id,
-      updates,
-      { new: true }
-    );
+    const template = await PromptTemplate.findByIdAndUpdate(id, updates, { new: true });
 
     if (!template) {
-      return res.status(404).json({
-        success: false,
-        message: 'Template not found'
-      });
+      return res.status(404).json({ success: false, message: 'Template not found' });
     }
 
     await AuditLog.create({
@@ -137,42 +110,100 @@ exports.updatePromptTemplate = async (req, res) => {
       ipAddress: req.ip
     });
 
-    res.json({
-      success: true,
-      message: 'Template updated',
-      template
-    });
+    res.json({ success: true, message: 'Template updated', template });
   } catch (error) {
     logger.error(`Update prompt template error: ${error.message}`);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to update template'
-    });
+    res.status(500).json({ success: false, message: 'Failed to update template' });
   }
 };
 
 // Get system stats
 exports.getSystemStats = async (req, res) => {
   try {
-    const stats = {
-      users: await User.countDocuments(),
-      activeUsers: await User.countDocuments({ isActive: true }),
-      adminUsers: await User.countDocuments({ isAdmin: true }),
-      newUsersThisMonth: await User.countDocuments({
+    // ── Basic counts ──────────────────────────────────────────────────────────
+    const [
+      totalUsers,
+      activeUsers,
+      adminUsers,
+      newUsersThisMonth,
+      atRiskUsers,
+      roleAggregation
+    ] = await Promise.all([
+      User.countDocuments(),
+      User.countDocuments({ isActive: true }),
+      User.countDocuments({ isAdmin: true }),
+      User.countDocuments({
         createdAt: { $gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) }
-      })
+      }),
+      // at-risk = recommendations with category at_risk
+      Recommendation.countDocuments({ category: 'at_risk' }).catch(() => 0),
+      // group users by role for chart
+      User.aggregate([
+        { $match: { isAdmin: false } },
+        { $group: { _id: '$role', count: { $sum: 1 } } },
+        { $sort: { count: -1 } }
+      ])
+    ]);
+
+    // ── Map role aggregation into chart-friendly format ───────────────────────
+    // Group similar roles into readable buckets for the bar chart
+    const roleBuckets = {
+      'Engineers':  ['Software Engineer', 'Senior Engineer', 'Junior Engineer', 'Intern'],
+      'Managers':   ['Engineering Manager', 'VP Engineering', 'Director of Engineering'],
+      'Leads':      ['Tech Lead', 'CTO', 'CEO'],
+      'QA / Ops':   ['QA Engineer', 'DevOps Engineer', 'Data Engineer', 'Security Engineer'],
     };
+
+    const usersByRole = Object.entries(roleBuckets).map(([bucket, roles]) => ({
+      role: bucket,
+      count: roleAggregation
+        .filter(r => roles.includes(r._id))
+        .reduce((sum, r) => sum + r.count, 0)
+    }));
+
+    // ── Service connectivity (simple ping checks) ─────────────────────────────
+    let mongoConnected = false;
+    let redisConnected = false;
+    let chromaConnected = false;
+
+    try {
+      await User.findOne().select('_id').lean();
+      mongoConnected = true;
+    } catch (_) {}
+
+    try {
+      const redis = require('../config/redis');
+      if (redis?.status === 'ready' || typeof redis?.ping === 'function') {
+        await redis.ping();
+        redisConnected = true;
+      }
+    } catch (_) {}
+
+    try {
+      const axios = require('axios');
+      const chromaHost = process.env.CHROMA_HOST || 'chroma';
+      const chromaPort = process.env.CHROMA_PORT || 8000;
+      await axios.get(`http://${chromaHost}:${chromaPort}/api/v2/heartbeat`, { timeout: 2000 });
+      chromaConnected = true;
+    } catch (_) {}
 
     res.json({
       success: true,
-      stats
+      stats: {
+        users: totalUsers,
+        activeUsers,
+        adminUsers,
+        newUsersThisMonth,
+        atRiskUsers,
+        usersByRole,
+        mongoConnected,
+        redisConnected,
+        chromaConnected,
+      }
     });
   } catch (error) {
     logger.error(`Get system stats error: ${error.message}`);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to get system stats'
-    });
+    res.status(500).json({ success: false, message: 'Failed to get system stats' });
   }
 };
 
@@ -183,13 +214,9 @@ exports.impersonateUser = async (req, res) => {
 
     const user = await User.findById(userId);
     if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'User not found'
-      });
+      return res.status(404).json({ success: false, message: 'User not found' });
     }
 
-    // Generate tokens for impersonated user
     const jwt = require('jsonwebtoken');
     const accessToken = jwt.sign(
       {
@@ -199,7 +226,7 @@ exports.impersonateUser = async (req, res) => {
         roleLevel: user.roleLevel,
         isAdmin: user.isAdmin,
         superior: user.superior?.toString(),
-        impersonatedBy: req.user.userId // Track original admin
+        impersonatedBy: req.user.userId
       },
       process.env.JWT_SECRET,
       { expiresIn: '1h' }
@@ -214,17 +241,10 @@ exports.impersonateUser = async (req, res) => {
       ipAddress: req.ip
     });
 
-    res.json({
-      success: true,
-      message: 'Impersonation token generated',
-      accessToken
-    });
+    res.json({ success: true, message: 'Impersonation token generated', accessToken });
   } catch (error) {
     logger.error(`Impersonate user error: ${error.message}`);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to impersonate user'
-    });
+    res.status(500).json({ success: false, message: 'Failed to impersonate user' });
   }
 };
 
@@ -242,13 +262,9 @@ exports.createUser = async (req, res) => {
 
     const existing = await User.findOne({ email });
     if (existing) {
-      return res.status(400).json({
-        success: false,
-        message: 'Email already in use'
-      });
+      return res.status(400).json({ success: false, message: 'Email already in use' });
     }
 
-    // Determine roleLevel from role
     const roleLevelMap = {
       'CEO': 1, 'CTO': 2, 'VP Engineering': 3,
       'Director of Engineering': 4, 'Engineering Manager': 5,
@@ -259,15 +275,13 @@ exports.createUser = async (req, res) => {
       'Intern': 9, 'Admin': 1
     };
 
-    const roleLevel = roleLevelMap[role] || 7;
-
     const user = new User({
       firstName,
       lastName,
       email,
       password,
       role,
-      roleLevel,
+      roleLevel: roleLevelMap[role] || 7,
       superior: superior || req.user.userId,
       isFirstLogin: true
     });
@@ -298,9 +312,6 @@ exports.createUser = async (req, res) => {
     });
   } catch (error) {
     logger.error(`Create user error: ${error.message}`);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to create user'
-    });
+    res.status(500).json({ success: false, message: 'Failed to create user' });
   }
 };
