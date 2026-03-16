@@ -1,7 +1,5 @@
 require('dotenv').config();
 
-console.log("JWT_SECRET =", process.env.JWT_SECRET);
-
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -13,9 +11,6 @@ const compression = require('compression');
 const rateLimit = require('express-rate-limit');
 const slowDown = require('express-slow-down');
 const winston = require('winston');
-const path = require('path');
-
-
 
 // Import configs
 const connectDB = require('./config/db');
@@ -56,13 +51,35 @@ const logger = winston.createLogger({
   ]
 });
 
+// ── CORS origins — defined FIRST before anything uses them ──────────────────
+const allowedOrigins = [
+  'https://orgos-swart.vercel.app',
+  'http://localhost:3000',
+  'http://localhost:3001',
+  process.env.FRONTEND_URL,
+].filter(Boolean); // remove undefined/null entries
+
+const corsOptions = {
+  origin: function (origin, callback) {
+    // Allow requests with no origin (mobile apps, curl, Postman)
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    callback(new Error('CORS not allowed'));
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+};
+// ────────────────────────────────────────────────────────────────────────────
+
 // Initialize app
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin:allowedOrigins,
-    credentials: true
+    origin: allowedOrigins,
+    credentials: true,
+    methods: ['GET', 'POST'],
   }
 });
 
@@ -80,36 +97,11 @@ app.use(helmet({
   crossOriginEmbedderPolicy: false
 }));
 
-// CORS
-// app.use(cors({
-//   origin: process.env.FRONTEND_URL || 'http://localhost:3000',
-//   credentials: true,
-//   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-//   allowedHeaders: ['Content-Type', 'Authorization']
-// }));
+// CORS — must be before all routes
+app.use(cors(corsOptions));
 
-
-
-const allowedOrigins = [
-  "https://orgos-swart.vercel.app",
-  "http://localhost:3000",
-  "http://localhost:3001",
-];
-
-app.use(
-  cors({
-    origin: function (origin, callback) {
-      if (!origin || allowedOrigins.includes(origin)) {
-        callback(null, true);
-      } else {
-        callback(new Error("CORS not allowed"));
-      }
-    },
-    credentials: true,
-    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-  })
-);
+// Handle preflight OPTIONS requests explicitly
+app.options('*', cors(corsOptions));
 
 // Compression
 app.use(compression());
@@ -126,8 +118,8 @@ app.use(morgan('combined', {
 
 // Rate limiting
 const generalLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // 100 requests per window
+  windowMs: 15 * 60 * 1000,
+  max: 100,
   message: {
     success: false,
     message: 'Too many requests, please try again later.'
@@ -135,7 +127,7 @@ const generalLimiter = rateLimit({
 });
 app.use('/api/', generalLimiter);
 
-// Speed limiting for intensive routes
+// Speed limiting
 const speedLimiter = slowDown({
   windowMs: 15 * 60 * 1000,
   delayAfter: 50,
@@ -165,16 +157,12 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Socket.io setup for WebRTC and real-time
-const rooms = new Map(); // meetingId -> { users: [], recording: boolean }
+// Socket.io setup
+const rooms = new Map();
 
 io.use(async (socket, next) => {
-  // Authenticate socket connection
   const token = socket.handshake.auth.token;
-  if (!token) {
-    return next(new Error('Authentication required'));
-  }
-
+  if (!token) return next(new Error('Authentication required'));
   try {
     const jwt = require('jsonwebtoken');
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
@@ -189,64 +177,30 @@ io.use(async (socket, next) => {
 io.on('connection', (socket) => {
   logger.info(`Socket connected: ${socket.id}, user: ${socket.userId}`);
 
-  // Join meeting room
   socket.on('join-room', ({ meetingId, userId }) => {
     socket.join(meetingId);
-
     if (!rooms.has(meetingId)) {
-      rooms.set(meetingId, {
-        users: [],
-        recording: false,
-        raisedHands: new Set()
-      });
+      rooms.set(meetingId, { users: [], recording: false, raisedHands: new Set() });
     }
-
     const room = rooms.get(meetingId);
-    const userInfo = {
-      socketId: socket.id,
-      userId,
-      peerId: null
-    };
-    room.users.push(userInfo);
-
-    // Notify others about new user
+    room.users.push({ socketId: socket.id, userId, peerId: null });
     socket.to(meetingId).emit('user-connected', userId);
-
-    // Send existing users to new user
     socket.emit('existing-users', room.users.filter(u => u.socketId !== socket.id));
-
-    // Send recording status
     socket.emit('recording-status', room.recording);
-
-    logger.info(`User ${userId} joined room ${meetingId}`);
   });
 
-  // WebRTC signaling
   socket.on('offer', ({ meetingId, offer, targetUserId }) => {
-    socket.to(meetingId).emit('offer', {
-      offer,
-      userId: socket.userId,
-      targetUserId
-    });
+    socket.to(meetingId).emit('offer', { offer, userId: socket.userId, targetUserId });
   });
 
   socket.on('answer', ({ meetingId, answer, targetUserId }) => {
-    socket.to(meetingId).emit('answer', {
-      answer,
-      userId: socket.userId,
-      targetUserId
-    });
+    socket.to(meetingId).emit('answer', { answer, userId: socket.userId, targetUserId });
   });
 
   socket.on('ice-candidate', ({ meetingId, candidate, targetUserId }) => {
-    socket.to(meetingId).emit('ice-candidate', {
-      candidate,
-      userId: socket.userId,
-      targetUserId
-    });
+    socket.to(meetingId).emit('ice-candidate', { candidate, userId: socket.userId, targetUserId });
   });
 
-  // Chat
   socket.on('chat-message', ({ meetingId, message }) => {
     io.to(meetingId).emit('chat-message', {
       userId: socket.userId,
@@ -256,14 +210,11 @@ io.on('connection', (socket) => {
     });
   });
 
-  // Raise hand
   socket.on('raise-hand', ({ meetingId }) => {
     const room = rooms.get(meetingId);
     if (room) {
       room.raisedHands.add(socket.userId);
-      io.to(meetingId).emit('hand-raised', {
-        userId: socket.userId
-      });
+      io.to(meetingId).emit('hand-raised', { userId: socket.userId });
     }
   });
 
@@ -271,13 +222,10 @@ io.on('connection', (socket) => {
     const room = rooms.get(meetingId);
     if (room) {
       room.raisedHands.delete(socket.userId);
-      io.to(meetingId).emit('hand-lowered', {
-        userId: socket.userId
-      });
+      io.to(meetingId).emit('hand-lowered', { userId: socket.userId });
     }
   });
 
-  // Recording
   socket.on('start-recording', ({ meetingId }) => {
     const room = rooms.get(meetingId);
     if (room) {
@@ -294,22 +242,15 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Processing status updates (from workers)
   socket.on('processing-update', ({ meetingId, step, status, message }) => {
-    // Only allow server workers to send this
     io.to(meetingId).emit('processing-update', {
-      step,
-      status,
-      message,
+      step, status, message,
       timestamp: new Date().toISOString()
     });
   });
 
-  // Disconnect
   socket.on('disconnect', () => {
     logger.info(`Socket disconnected: ${socket.id}`);
-
-    // Remove user from all rooms
     rooms.forEach((room, meetingId) => {
       const userIndex = room.users.findIndex(u => u.socketId === socket.id);
       if (userIndex > -1) {
@@ -317,37 +258,23 @@ io.on('connection', (socket) => {
         room.users.splice(userIndex, 1);
         room.raisedHands.delete(userId);
         socket.to(meetingId).emit('user-disconnected', userId);
-
-        // Clean up empty rooms
-        if (room.users.length === 0) {
-          rooms.delete(meetingId);
-        }
+        if (room.users.length === 0) rooms.delete(meetingId);
       }
     });
   });
 });
 
-// Expose io to routes
 app.set('io', io);
 
 // Error handling
 app.use((err, req, res, next) => {
   logger.error(`Error: ${err.message}`);
-
   if (err.name === 'MulterError') {
-    return res.status(400).json({
-      success: false,
-      message: `File upload error: ${err.message}`
-    });
+    return res.status(400).json({ success: false, message: `File upload error: ${err.message}` });
   }
-
-  if (err.message === 'Not allowed by CORS') {
-    return res.status(403).json({
-      success: false,
-      message: 'CORS error'
-    });
+  if (err.message === 'CORS not allowed' || err.message === 'Not allowed by CORS') {
+    return res.status(403).json({ success: false, message: 'CORS error' });
   }
-
   res.status(err.status || 500).json({
     success: false,
     message: err.message || 'Internal server error'
@@ -356,10 +283,7 @@ app.use((err, req, res, next) => {
 
 // 404 handler
 app.use((req, res) => {
-  res.status(404).json({
-    success: false,
-    message: 'Route not found'
-  });
+  res.status(404).json({ success: false, message: 'Route not found' });
 });
 
 // Start server
@@ -367,9 +291,9 @@ const PORT = process.env.PORT || 5001;
 server.listen(PORT, () => {
   logger.info(`Server running on port ${PORT}`);
   logger.info(`Environment: ${process.env.NODE_ENV || 'development'}`);
+  logger.info(`Allowed origins: ${allowedOrigins.join(', ')}`);
 });
 
-// Graceful shutdown
 process.on('SIGTERM', () => {
   logger.info('SIGTERM received. Shutting down gracefully...');
   server.close(() => {
