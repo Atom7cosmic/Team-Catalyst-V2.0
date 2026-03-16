@@ -61,7 +61,7 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+    origin:allowedOrigins,
     credentials: true
   }
 });
@@ -91,7 +91,9 @@ app.use(helmet({
 
 
 const allowedOrigins = [
-  "https://orgos-swart.vercel.app"
+  "https://orgos-swart.vercel.app",
+  "http://localhost:3000",
+  "http://localhost:3001",
 ];
 
 app.use(
