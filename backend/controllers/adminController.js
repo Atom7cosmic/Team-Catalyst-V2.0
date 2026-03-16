@@ -180,11 +180,10 @@ exports.getSystemStats = async (req, res) => {
     } catch (_) {}
 
     try {
-      const axios = require('axios');
       const chromaHost = process.env.CHROMA_HOST || 'chroma';
       const chromaPort = process.env.CHROMA_PORT || 8000;
-      await axios.get(`http://${chromaHost}:${chromaPort}/api/v2/heartbeat`, { timeout: 2000 });
-      chromaConnected = true;
+      const response = await fetch(`http://${chromaHost}:${chromaPort}/api/v2/heartbeat`, { signal: AbortSignal.timeout(2000) });
+      if (response.ok) chromaConnected = true;
     } catch (_) {}
 
     res.json({

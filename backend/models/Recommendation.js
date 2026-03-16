@@ -100,6 +100,10 @@ const recommendationSchema = new mongoose.Schema({
   dismissedReason: {
     type: String,
     default: null
+  },
+  acknowledgeReason: {
+    type: String,
+    default: null
   }
 }, {
   timestamps: true

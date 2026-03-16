@@ -1,10 +1,11 @@
 const express = require('express');
 const router = express.Router();
 const { adminController } = require('../controllers');
-const { authMiddleware, adminMiddleware } = require('../middleware');
+const { authMiddleware } = require('../middleware');
 
 router.use(authMiddleware);
-router.use(adminMiddleware);
+const { requireSuperior } = require('../middleware/roleMiddleware');
+router.use((req, res, next) => { if (req.user?.isAdmin) return next(); return requireSuperior(req, res, next); });
 
 // Admin routes
 router.get('/users', adminController.getAllUsers);

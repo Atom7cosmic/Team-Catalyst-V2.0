@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const { Attendance, AuditLog } = require('../models');
 const { canAccessUser } = require('../middleware');
 const winston = require('winston');
@@ -43,7 +44,7 @@ exports.getAttendance = async (req, res) => {
 
     // Calculate stats
     const stats = await Attendance.aggregate([
-      { $match: { user: new (require('mongoose').Types.ObjectId)(targetUserId) } },
+      { $match: { user: new mongoose.Types.ObjectId(targetUserId) } },
       {
         $group: {
           _id: null,

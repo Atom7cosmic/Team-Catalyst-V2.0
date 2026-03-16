@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(echo \"=== Files to Overwrite \\(should now have full code\\) ===\" && \\\\\nls -la frontend/app/audit/page.jsx \\\\\n  frontend/app/notifications/page.jsx \\\\\n  frontend/app/settings/page.jsx \\\\\n  frontend/app/admin/users/page.jsx \\\\\n  frontend/app/team/page.jsx \\\\\n  frontend/app/recommendations/page.jsx && \\\\\necho \"\" && \\\\\necho \"=== Files Created \\(should exist\\) ===\" && \\\\\nls -la frontend/components/meeting/MeetingQAPanel.jsx \\\\\n  frontend/components/meeting/SimilarMeetingsPanel.jsx \\\\\n  frontend/components/meeting/MeetingRoom.jsx \\\\\n  frontend/components/dashboard/SubordinateDashboard.jsx \\\\\n  frontend/components/dashboard/SuperiorDashboard.jsx \\\\\n  frontend/components/dashboard/AdminDashboard.jsx \\\\\n  frontend/app/meetings/\\\\[id\\\\]/page.jsx \\\\\n  frontend/app/meetings/\\\\[id\\\\]/room/page.jsx \\\\\n  frontend/app/meetings/\\\\[id\\\\]/schedule-followup/page.jsx \\\\\n  frontend/app/team/\\\\[userId\\\\]/page.jsx \\\\\n  frontend/app/admin/prompts/page.jsx \\\\\n  frontend/app/admin/system/page.jsx \\\\\n  frontend/app/dashboard/admin/page.jsx 2>/dev/null || echo \"Some files may not exist\")",
-      "Bash(cd /Users/aryansoni/Hackathon/orgos/frontend && grep -r \"from '@/components\" --include=\"*.jsx\" | grep -v node_modules | awk -F\"'\" '{print $2}' | sort | uniq)"
-    ]
-  }
-}

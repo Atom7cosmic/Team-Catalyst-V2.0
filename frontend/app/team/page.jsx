@@ -7,17 +7,26 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
-import { Users, Search, ChevronRight, UserPlus, Mail, ArrowUpRight, X } from 'lucide-react';
+import { Users, Search, UserPlus, Mail, ArrowUpRight, X } from 'lucide-react';
 import api from '@/lib/axios';
 import { useAuth } from '@/context/AuthContext';
 import OrgChart from '@/components/shared/OrgChart';
 import { CardSkeleton } from '@/components/shared/Skeleton';
 import toast from 'react-hot-toast';
 
-const ROLES = [
-  'Software Engineer', 'Junior Engineer', 'Senior Engineer',
-  'Tech Lead', 'Engineering Manager', 'QA Engineer',
-  'VP Engineering', 'CTO', 'CEO', 'Intern', 'DevOps Engineer'
+const ALL_ROLES = [
+  { name: 'CEO',                     level: 1 },
+  { name: 'CTO',                     level: 2 },
+  { name: 'VP Engineering',          level: 3 },
+  { name: 'Director of Engineering', level: 4 },
+  { name: 'Engineering Manager',     level: 5 },
+  { name: 'Tech Lead',               level: 6 },
+  { name: 'Senior Engineer',         level: 6 },
+  { name: 'Software Engineer',       level: 7 },
+  { name: 'QA Engineer',             level: 7 },
+  { name: 'DevOps Engineer',         level: 7 },
+  { name: 'Junior Engineer',         level: 8 },
+  { name: 'Intern',                  level: 9 },
 ];
 
 export default function TeamPage() {
@@ -29,15 +38,28 @@ export default function TeamPage() {
   const [search, setSearch] = useState('');
   const [showModal, setShowModal] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+
+  const availableRoles = isAdmin
+    ? ALL_ROLES.map(r => r.name)
+    : ALL_ROLES.filter(r => r.level > (user?.roleLevel || 0)).map(r => r.name);
+
+  const defaultRole = availableRoles[0] || 'Software Engineer';
+
   const [form, setForm] = useState({
     firstName: '', lastName: '', email: '',
-    password: '', role: 'Software Engineer', superior: '',
+    password: '', role: defaultRole, superior: '',
   });
 
   useEffect(() => {
     fetchTeamData();
     fetchOrgChart();
   }, []);
+
+  useEffect(() => {
+    if (availableRoles.length > 0) {
+      setForm(f => ({ ...f, role: availableRoles[0] }));
+    }
+  }, [user?.roleLevel]);
 
   const fetchTeamData = async () => {
     try {
@@ -65,6 +87,14 @@ export default function TeamPage() {
     if (!form.password || form.password.length < 6) { toast.error('Password must be at least 6 characters'); return; }
     if (!form.role) { toast.error('Role is required'); return; }
 
+    if (!isAdmin) {
+      const selectedRole = ALL_ROLES.find(r => r.name === form.role);
+      if (selectedRole && selectedRole.level <= (user?.roleLevel || 0)) {
+        toast.error('You can only add members with a lower role than yours');
+        return;
+      }
+    }
+
     setSubmitting(true);
     try {
       await api.post('/admin/users', {
@@ -75,9 +105,9 @@ export default function TeamPage() {
         role: form.role,
         superior: form.superior || user?._id,
       });
-      toast.success('Team member added');
+      toast.success('Team member added successfully');
       setShowModal(false);
-      setForm({ firstName: '', lastName: '', email: '', password: '', role: 'Software Engineer', superior: '' });
+      setForm({ firstName: '', lastName: '', email: '', password: '', role: availableRoles[0] || defaultRole, superior: '' });
       fetchTeamData();
       fetchOrgChart();
     } catch (error) {
@@ -126,26 +156,24 @@ export default function TeamPage() {
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <div className="lg:col-span-2 space-y-6">
+
+            {/* Your Manager card — static, not clickable for anyone */}
             {teamData?.superior && (
               <Card className="bg-card border-muted">
                 <CardHeader>
                   <CardTitle className="text-sm text-muted-foreground">Your Manager</CardTitle>
                 </CardHeader>
                 <CardContent>
-                  <div
-                    className="flex items-center justify-between p-4 rounded-lg bg-muted/50 hover:bg-muted cursor-pointer transition-colors"
-                    onClick={() => router.push(`/team/${teamData.superior._id}`)}
-                  >
-                    <div className="flex items-center gap-4">
-                      <div className="w-12 h-12 rounded-full bg-slate-700 flex items-center justify-center text-slate-300 text-lg">
-                        {teamData.superior.firstName?.[0]}{teamData.superior.lastName?.[0]}
-                      </div>
-                      <div>
-                        <p className="font-medium text-slate-100">{teamData.superior.firstName} {teamData.superior.lastName}</p>
-                        <p className="text-sm text-muted-foreground">{teamData.superior.role}</p>
-                      </div>
+                  <div className="flex items-center gap-4 p-4 rounded-lg bg-muted/50">
+                    <div className="w-12 h-12 rounded-full bg-slate-700 flex items-center justify-center text-slate-300 text-lg">
+                      {teamData.superior.firstName?.[0]}{teamData.superior.lastName?.[0]}
                     </div>
-                    <ChevronRight className="h-5 w-5 text-slate-500" />
+                    <div>
+                      <p className="font-medium text-slate-100">
+                        {teamData.superior.firstName} {teamData.superior.lastName}
+                      </p>
+                      <p className="text-sm text-muted-foreground">{teamData.superior.role}</p>
+                    </div>
                   </div>
                 </CardContent>
               </Card>
@@ -174,40 +202,43 @@ export default function TeamPage() {
                   </div>
                 ) : (
                   <div className="space-y-3">
-                    {filteredReports.map((member) => (
-                      <div
-                        key={member._id}
-                        className="flex items-center justify-between p-4 rounded-lg bg-muted/50 hover:bg-muted cursor-pointer transition-colors group"
-                        onClick={() => router.push(`/team/${member._id}`)}
-                      >
-                        <div className="flex items-center gap-4">
-                          <div className="w-12 h-12 rounded-full bg-slate-700 flex items-center justify-center text-slate-300 text-lg">
-                            {member.firstName?.[0]}{member.lastName?.[0]}
-                          </div>
-                          <div>
-                            <div className="flex items-center gap-2">
-                              <p className="font-medium text-slate-100">{member.firstName} {member.lastName}</p>
-                              <ArrowUpRight className="h-4 w-4 text-slate-500 opacity-0 group-hover:opacity-100 transition-opacity" />
+                    {filteredReports.map((member) => {
+                      const isActive = member.isActive !== false;
+                      return (
+                        <div
+                          key={member._id}
+                          className="flex items-center justify-between p-4 rounded-lg bg-muted/50 hover:bg-muted cursor-pointer transition-colors group"
+                          onClick={() => router.push(`/team/${member._id}`)}
+                        >
+                          <div className="flex items-center gap-4">
+                            <div className="w-12 h-12 rounded-full bg-slate-700 flex items-center justify-center text-slate-300 text-lg">
+                              {member.firstName?.[0]}{member.lastName?.[0]}
                             </div>
-                            <p className="text-sm text-muted-foreground">{member.role}</p>
-                            <p className="text-xs text-slate-500">{member.email}</p>
+                            <div>
+                              <div className="flex items-center gap-2">
+                                <p className="font-medium text-slate-100">{member.firstName} {member.lastName}</p>
+                                <ArrowUpRight className="h-4 w-4 text-slate-500 opacity-0 group-hover:opacity-100 transition-opacity" />
+                              </div>
+                              <p className="text-sm text-muted-foreground">{member.role}</p>
+                              <p className="text-xs text-slate-500">{member.email}</p>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <Badge className={isActive ? 'bg-green-500/20 text-green-500' : 'bg-red-500/20 text-red-500'}>
+                              {isActive ? 'Active' : 'Inactive'}
+                            </Badge>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              onClick={(e) => { e.stopPropagation(); window.location.href = `mailto:${member.email}`; }}
+                              className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                            >
+                              <Mail className="h-4 w-4" />
+                            </Button>
                           </div>
                         </div>
-                        <div className="flex items-center gap-2">
-                          <Badge className={member.isActive ? 'bg-green-500/20 text-green-500' : 'bg-red-500/20 text-red-500'}>
-                            {member.isActive ? 'Active' : 'Inactive'}
-                          </Badge>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            onClick={(e) => { e.stopPropagation(); window.location.href = `mailto:${member.email}`; }}
-                            className="h-8 w-8 text-muted-foreground hover:text-foreground"
-                          >
-                            <Mail className="h-4 w-4" />
-                          </Button>
-                        </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               </CardContent>
@@ -249,13 +280,13 @@ export default function TeamPage() {
                 <div className="flex justify-between items-center">
                   <span className="text-muted-foreground">Active</span>
                   <span className="font-medium text-green-400">
-                    {teamData?.directReports?.filter(m => m.isActive).length || 0}
+                    {teamData?.directReports?.filter(m => m.isActive !== false).length || 0}
                   </span>
                 </div>
                 <div className="flex justify-between items-center">
                   <span className="text-muted-foreground">Inactive</span>
                   <span className="font-medium text-slate-500">
-                    {teamData?.directReports?.filter(m => !m.isActive).length || 0}
+                    {teamData?.directReports?.filter(m => m.isActive === false).length || 0}
                   </span>
                 </div>
               </CardContent>
@@ -321,13 +352,19 @@ export default function TeamPage() {
               </div>
 
               <div>
-                <label className="text-sm text-muted-foreground mb-1 block">Role *</label>
+                <label className="text-sm text-muted-foreground mb-1 block">
+                  Role * {!isAdmin && <span className="text-xs text-slate-500">(roles below your level only)</span>}
+                </label>
                 <select
                   value={form.role}
                   onChange={e => setForm({ ...form, role: e.target.value })}
                   className="w-full rounded-md bg-muted border border-slate-700 px-3 py-2 text-sm text-slate-100 focus:outline-none focus:ring-2 focus:ring-primary"
                 >
-                  {ROLES.map(r => <option key={r} value={r}>{r}</option>)}
+                  {availableRoles.length > 0 ? (
+                    availableRoles.map(r => <option key={r} value={r}>{r}</option>)
+                  ) : (
+                    <option disabled>No roles available</option>
+                  )}
                 </select>
               </div>
             </div>
@@ -336,7 +373,11 @@ export default function TeamPage() {
               <Button variant="outline" className="flex-1 border-slate-700" onClick={() => setShowModal(false)}>
                 Cancel
               </Button>
-              <Button className="flex-1" onClick={handleAddMember} disabled={submitting}>
+              <Button
+                className="flex-1"
+                onClick={handleAddMember}
+                disabled={submitting || availableRoles.length === 0}
+              >
                 {submitting ? 'Adding...' : 'Add Member'}
               </Button>
             </div>

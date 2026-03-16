@@ -19,27 +19,27 @@ api.interceptors.request.use(
     }
     return config;
   },
-  (error) => {
-    return Promise.reject(error);
-  }
+  (error) => Promise.reject(error)
 );
 
 // Response interceptor - handle token refresh
 api.interceptors.response.use(
-  (response) => {
-    return response;
-  },
+  (response) => response,
   async (error) => {
     const originalRequest = error.config;
 
-    // If token expired and we haven't retried yet
+    // Skip refresh for auth endpoints to avoid infinite loops
+    const isAuthEndpoint = originalRequest?.url?.includes('/auth/');
+
+    // Trigger refresh on ANY 401 (not just TOKEN_EXPIRED code)
+    // as long as we haven't already retried and it's not an auth endpoint
     if (error.response?.status === 401 &&
-        error.response?.data?.code === 'TOKEN_EXPIRED' &&
-        !originalRequest._retry) {
+        !originalRequest._retry &&
+        !isAuthEndpoint) {
+
       originalRequest._retry = true;
 
       try {
-        // Try to refresh token
         const refreshResponse = await axios.post(
           `${API_URL}/api/auth/refresh`,
           {},
@@ -49,27 +49,23 @@ api.interceptors.response.use(
         if (refreshResponse.data.success) {
           const { accessToken, user } = refreshResponse.data;
           localStorage.setItem('accessToken', accessToken);
-          localStorage.setItem('user', JSON.stringify(user));
+          if (user) localStorage.setItem('user', JSON.stringify(user));
 
-          // Retry original request
+          // Update default header for all future requests
+          api.defaults.headers.common['Authorization'] = `Bearer ${accessToken}`;
+
+          // Retry original request with new token
           originalRequest.headers.Authorization = `Bearer ${accessToken}`;
           return api(originalRequest);
         }
       } catch (refreshError) {
-        // Refresh failed, redirect to login
+        // Refresh token itself expired — force logout
         localStorage.removeItem('accessToken');
         localStorage.removeItem('user');
+        delete api.defaults.headers.common['Authorization'];
         window.location.href = '/login';
         return Promise.reject(refreshError);
       }
-    }
-
-    // If refresh token expired
-    if (error.response?.status === 401 &&
-        error.response?.data?.code === 'REFRESH_EXPIRED') {
-      localStorage.removeItem('accessToken');
-      localStorage.removeItem('user');
-      window.location.href = '/login';
     }
 
     return Promise.reject(error);

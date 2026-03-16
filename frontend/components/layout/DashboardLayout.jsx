@@ -1,10 +1,11 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { useAuth } from '@/context/AuthContext'
 import useAuthStore from '@/store/authStore'
+import useNotificationStore from '@/store/notificationStore'
 import {
   LayoutDashboard,
   Users,
@@ -50,9 +51,14 @@ export default function DashboardLayout({ children }) {
   const pathname = usePathname()
   const { user, logout } = useAuthStore()
   const { isAdmin } = useAuth()
+  const { unreadCount, fetchNotifications } = useNotificationStore()
 
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [userMenuOpen, setUserMenuOpen] = useState(false)
+
+  useEffect(() => {
+    fetchNotifications(50)
+  }, [fetchNotifications])
 
   const handleLogout = async () => {
     await logout()
@@ -134,9 +140,11 @@ export default function DashboardLayout({ children }) {
               <Link href="/notifications" className="relative">
                 <Button variant="ghost" size="icon">
                   <Bell className="h-5 w-5" />
-                  <span className="absolute -top-1 -right-1 h-4 w-4 rounded-full bg-red-500 text-xs flex items-center justify-center">
-                    0
-                  </span>
+                  {unreadCount > 0 && (
+                    <span className="absolute -top-1 -right-1 h-4 w-4 rounded-full bg-red-500 text-xs flex items-center justify-center">
+                      {unreadCount > 99 ? '99+' : unreadCount}
+                    </span>
+                  )}
                 </Button>
               </Link>
 

@@ -9,6 +9,7 @@ const {
   Notification
 } = require('../models');
 const { getOrgTreeUsers, isSuperior } = require('../middleware');
+const mongoose = require('mongoose');
 const winston = require('winston');
 
 const logger = winston.createLogger({
@@ -175,7 +176,7 @@ exports.getTeamOverview = async (req, res) => {
 
     // Performance distribution
     const performanceDistribution = await Performance.aggregate([
-      { $match: { user: { $in: accessibleUsers.map(id => require('mongoose').Types.ObjectId(id)) } } },
+      { $match: { user: { $in: accessibleUsers.map(id => new mongoose.Types.ObjectId(id)) } } },
       {
         $bucket: {
           groupBy: '$currentScore',
@@ -190,7 +191,7 @@ exports.getTeamOverview = async (req, res) => {
 
     // Trend distribution
     const trendDistribution = await Performance.aggregate([
-      { $match: { user: { $in: accessibleUsers.map(id => require('mongoose').Types.ObjectId(id)) } } },
+      { $match: { user: { $in: accessibleUsers.map(id => new mongoose.Types.ObjectId(id)) } } },
       {
         $group: {
           _id: '$trend',
@@ -203,7 +204,7 @@ exports.getTeamOverview = async (req, res) => {
     const taskStats = await Task.aggregate([
       {
         $match: {
-          assignee: { $in: accessibleUsers.map(id => require('mongoose').Types.ObjectId(id)) }
+          assignee: { $in: accessibleUsers.map(id => new mongoose.Types.ObjectId(id)) }
         }
       },
       {

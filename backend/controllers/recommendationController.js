@@ -126,9 +126,12 @@ exports.acknowledgeRecommendation = async (req, res) => {
       });
     }
 
+    const { reason } = req.body;
+
     recommendation.status = 'acknowledged';
     recommendation.acknowledgedBy = req.user.userId;
     recommendation.acknowledgedAt = new Date();
+    recommendation.acknowledgeReason = reason || null;
 
     await recommendation.save();
 

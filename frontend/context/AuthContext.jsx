@@ -76,7 +76,7 @@ export function AuthProvider({ children }) {
     user,
     isAuthenticated: !!user,
     isLoading: isLoading || !initialized,
-    isSuperior: user?.roleLevel <= 5 || user?.isAdmin,
+    isSuperior: ['CEO','CTO','VP Engineering','Director of Engineering','Engineering Manager','Tech Lead'].includes(user?.role) || user?.isAdmin,
     isSubordinate: user?.roleLevel >= 7,
     isAdmin: user?.isAdmin,
     initialized,
