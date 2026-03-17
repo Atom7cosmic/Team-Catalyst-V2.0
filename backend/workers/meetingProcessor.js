@@ -123,17 +123,6 @@ function mergeShortSegments(segments, minDuration = 2.0) {
   return merged;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// FIX: LLM speaker inference with corrected batch index handling
-//
-// Root cause of wrong speakers: the LLM was asked to label segments with
-// GLOBAL indices (e.g. 30, 31, 32 for the second batch) but the prompt
-// showed them as [0], [1], [2] — so the LLM returned index:0,1,2 which
-// never matched globalIdx:30,31,32 → all fell through to round-robin fallback.
-//
-// Fix: always use LOCAL indices [0..batchSize-1] in the prompt AND in
-// the assignment lookup. Map back to the correct allLabeled slot via batchStart.
-// ─────────────────────────────────────────────────────────────────────────────
 async function inferSpeakersWithLLM(segments, attendeeNames) {
   if (!segments || segments.length === 0) return [];
 
@@ -148,7 +137,7 @@ async function inferSpeakersWithLLM(segments, attendeeNames) {
   for (let batchStart = 0; batchStart < segments.length; batchStart += batchSize) {
     const batch = segments.slice(batchStart, batchStart + batchSize);
 
-    // ✅ FIX: use LOCAL indices 0..batch.length-1 — matching what the LLM returns
+    // Use LOCAL indices 0..batch.length-1 — matching what the LLM returns
     const segmentList = batch.map((seg, localIdx) =>
       `[${localIdx}] ${seg.text?.trim()}`
     ).join('\n');
@@ -173,18 +162,16 @@ Return ONLY a valid JSON array (no markdown, no explanation, no extra text):
       const response = await groq.chat.completions.create({
         model: 'llama-3.3-70b-versatile',
         messages: [{ role: 'user', content: prompt }],
-        temperature: 0.0,
-        max_tokens: 2048
+        temperature: 0.1,
+        max_tokens: 4096
       });
 
       const content = response.choices[0]?.message?.content || '[]';
-      // Strip any markdown fences the model might still add
       const clean = content.replace(/```json|```/g, '').trim();
       let assignments = [];
       try {
         assignments = JSON.parse(clean);
       } catch (parseErr) {
-        // Try to extract JSON array from the response
         const match = clean.match(/\[[\s\S]*\]/);
         if (match) {
           assignments = JSON.parse(match[0]);
@@ -192,7 +179,7 @@ Return ONLY a valid JSON array (no markdown, no explanation, no extra text):
       }
 
       batch.forEach((seg, localIdx) => {
-        // ✅ FIX: look up by LOCAL index — same as what the prompt showed
+        // Look up by LOCAL index — same as what the prompt showed
         const assignment = assignments.find(a => a.index === localIdx);
         const assignedName = assignment?.speaker?.trim();
         // Validate: must be one of the actual attendee names
@@ -374,9 +361,36 @@ async function processMeeting(job) {
     await updateStep(meetingId, 'analysis', 'done', 'Analysis complete', io);
 
     // Step 5: Embeddings
+    // FIXED: Build chunks from transcriptSegments (real speaker names) not raw transcript.
+    // Raw transcript contains "Speaker_1", "Speaker_2" from Groq — ChromaDB would store those
+    // labels, so RAG Q&A could never find content when users ask about "Nancy" or "Bob".
+    // Now each chunk looks like:
+    //   "Nancy: Twilight was a very sappy-ass movie...\nBob: I agree..."
+    // so semantic search works correctly against real attendee names.
     await updateStep(meetingId, 'embedding', 'running', 'Storing embeddings', io);
     try {
-      const chunks = chunkTranscript(transcript, 300);
+      // Build speaker-labeled chunks from transcriptSegments
+      const speakerChunks = [];
+      let currentChunk = '';
+      let currentWordCount = 0;
+      const CHUNK_WORD_LIMIT = 300;
+
+      for (const seg of meeting.transcriptSegments) {
+        const line = `${seg.speaker}: ${seg.text}`;
+        const wordCount = line.split(' ').length;
+        if (currentWordCount + wordCount > CHUNK_WORD_LIMIT && currentChunk.length > 0) {
+          speakerChunks.push(currentChunk.trim());
+          currentChunk = '';
+          currentWordCount = 0;
+        }
+        currentChunk += line + '\n';
+        currentWordCount += wordCount;
+      }
+      if (currentChunk.trim().length > 0) speakerChunks.push(currentChunk.trim());
+
+      // Fall back to raw transcript chunks if segments are empty (e.g. very short recordings)
+      const chunks = speakerChunks.length > 0 ? speakerChunks : chunkTranscript(transcript, 300);
+
       const collection = await chromaClient.getCollection({ name: 'meeting_transcripts' });
       for (let i = 0; i < chunks.length; i++) {
         const embedding = await generateEmbedding(chunks[i]);

@@ -7,7 +7,7 @@ import {
   Mic, MicOff, Video, VideoOff, Phone,
   MessageSquare, ScreenShare, StopCircle,
   Hand, Users, PhoneOff, Circle,
-  Pin, PinOff, Maximize2, X
+  Pin, PinOff, Maximize2, Minimize2, X
 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
@@ -24,6 +24,7 @@ export default function MeetingRoom({ meetingId, user }) {
   const mediaRecorderRef = useRef(null);
   const recordingChunksRef = useRef([]);
   const chatBottomRef = useRef(null);
+  const fullscreenContainerRef = useRef(null);
 
   const [participantNames, setParticipantNames] = useState({});
   const [remoteStreams, setRemoteStreams] = useState({});
@@ -43,6 +44,7 @@ export default function MeetingRoom({ meetingId, user }) {
   const [pinnedUserId, setPinnedUserId] = useState(null);
   const [fullscreenUserId, setFullscreenUserId] = useState(null);
   const [meetingCancelled, setMeetingCancelled] = useState(false);
+  const [isNativeFullscreen, setIsNativeFullscreen] = useState(false);
 
   const myId = (user?._id || user?.id)?.toString();
   const myName = user?.firstName ? `${user.firstName} ${user.lastName}` : 'You';
@@ -74,12 +76,47 @@ export default function MeetingRoom({ meetingId, user }) {
     return participantNames[id]?.fullName || 'Participant';
   }, [participantNames, myId]);
 
-  // Callback ref for local video — attaches stream as soon as element mounts
   const setLocalVideoRef = useCallback((el) => {
     localVideoRef.current = el;
     if (el && localStreamRef.current) {
       el.srcObject = localStreamRef.current;
     }
+  }, []);
+
+  // Track native fullscreen changes
+  useEffect(() => {
+    const onChange = () => {
+      setIsNativeFullscreen(!!document.fullscreenElement);
+    };
+    document.addEventListener('fullscreenchange', onChange);
+    return () => document.removeEventListener('fullscreenchange', onChange);
+  }, []);
+
+  // FIX: Fullscreen — use the browser Fullscreen API on the container element
+  const handleFullscreen = useCallback((userId) => {
+    if (fullscreenUserId === userId && isNativeFullscreen) {
+      // Exit fullscreen
+      document.exitFullscreen().catch(() => {});
+      setFullscreenUserId(null);
+    } else {
+      setFullscreenUserId(userId);
+      // Request native fullscreen on the overlay container after it renders
+      setTimeout(() => {
+        if (fullscreenContainerRef.current) {
+          fullscreenContainerRef.current.requestFullscreen().catch((err) => {
+            // Fallback: overlay-only fullscreen still works visually
+            console.warn('Native fullscreen failed:', err.message);
+          });
+        }
+      }, 50);
+    }
+  }, [fullscreenUserId, isNativeFullscreen]);
+
+  const exitFullscreen = useCallback(() => {
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {});
+    }
+    setFullscreenUserId(null);
   }, []);
 
   useEffect(() => {
@@ -89,7 +126,6 @@ export default function MeetingRoom({ meetingId, user }) {
       try {
         await fetchParticipantNames();
 
-        // Get camera + mic
         const stream = await navigator.mediaDevices.getUserMedia({
           video: { width: 1280, height: 720, facingMode: 'user' },
           audio: true
@@ -99,7 +135,6 @@ export default function MeetingRoom({ meetingId, user }) {
 
         localStreamRef.current = stream;
 
-        // Attach immediately if ref already exists
         if (localVideoRef.current) {
           localVideoRef.current.srcObject = stream;
         }
@@ -115,8 +150,6 @@ export default function MeetingRoom({ meetingId, user }) {
           console.warn('Join API:', e.message);
         }
 
-        // ── existing-users: sent to ME when I join, listing who's already in room
-        // I am the INITIATOR for all existing peers
         socketRef.current.on('existing-users', (users) => {
           if (!mounted) return;
           users.forEach(({ userId }) => {
@@ -125,15 +158,11 @@ export default function MeetingRoom({ meetingId, user }) {
           });
         });
 
-        // ── user-connected: a NEW person joined AFTER me
-        // They will initiate the offer, so I am NOT the initiator
-        // ✅ FIX: was only showing a toast — now also creates a peer to receive their offer
         socketRef.current.on('user-connected', (userId) => {
           if (!mounted) return;
           if (!userId || userId?.toString() === myId) return;
           toast.success(`${getParticipantName(userId)} joined`);
           fetchParticipantNames();
-          // Create peer as non-initiator — wait for their offer to arrive
           createPeer(userId, false, stream);
         });
 
@@ -145,8 +174,6 @@ export default function MeetingRoom({ meetingId, user }) {
 
         socketRef.current.on('offer', ({ offer, userId }) => {
           if (!mounted) return;
-          // Signal the offer into the existing peer (created above in user-connected)
-          // If peer doesn't exist yet, create it now
           if (peersRef.current[userId]) {
             peersRef.current[userId].signal(offer);
           } else {
@@ -460,7 +487,7 @@ export default function MeetingRoom({ meetingId, user }) {
 
   if (meetingCancelled) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-950">
+      <div className="h-screen flex items-center justify-center bg-slate-950">
         <div className="text-center space-y-4">
           <div className="w-16 h-16 rounded-full bg-red-500/20 flex items-center justify-center mx-auto">
             <X className="h-8 w-8 text-red-400" />
@@ -475,7 +502,7 @@ export default function MeetingRoom({ meetingId, user }) {
 
   if (isConnecting) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-950">
+      <div className="h-screen flex items-center justify-center bg-slate-950">
         <div className="text-center space-y-4">
           <div className="animate-spin h-14 w-14 border-2 border-blue-500 border-t-transparent rounded-full mx-auto" />
           <p className="text-slate-300 font-medium">Setting up your camera and microphone...</p>
@@ -488,8 +515,104 @@ export default function MeetingRoom({ meetingId, user }) {
   const remoteEntries = Object.entries(remoteStreams);
   const totalParticipants = remoteEntries.length + 1;
 
+  // Controls bar — shared between main view and fullscreen overlay
+  const ControlsBar = () => (
+    <div className="bg-slate-900/95 backdrop-blur border-t border-slate-800 px-4 py-3 shrink-0">
+      <div className="flex items-center justify-center gap-2 flex-wrap">
+        <CtrlBtn onClick={toggleAudio} label={isAudioEnabled ? 'Mute' : 'Unmute'} danger={!isAudioEnabled}>
+          {isAudioEnabled ? <Mic className="h-5 w-5" /> : <MicOff className="h-5 w-5" />}
+        </CtrlBtn>
+        <CtrlBtn onClick={toggleVideo} label={isVideoEnabled ? 'Stop Video' : 'Start Video'} danger={!isVideoEnabled}>
+          {isVideoEnabled ? <Video className="h-5 w-5" /> : <VideoOff className="h-5 w-5" />}
+        </CtrlBtn>
+        <CtrlBtn onClick={toggleScreenShare} label={isScreenSharing ? 'Stop Share' : 'Share'} highlight={isScreenSharing}>
+          {isScreenSharing ? <StopCircle className="h-5 w-5" /> : <ScreenShare className="h-5 w-5" />}
+        </CtrlBtn>
+        <CtrlBtn onClick={toggleHand} label={isHandRaised ? 'Lower Hand' : 'Raise Hand'} warn={isHandRaised}>
+          <Hand className="h-5 w-5" />
+        </CtrlBtn>
+        {isHost && (
+          <CtrlBtn
+            onClick={isRecording ? stopRecording : startRecording}
+            label={isRecording ? 'Stop Rec' : 'Record'}
+            danger={isRecording}
+          >
+            <Circle className={cn('h-5 w-5', isRecording && 'fill-current')} />
+          </CtrlBtn>
+        )}
+        {isHost && (
+          <div className="flex flex-col items-center gap-1">
+            <button
+              onClick={handleEndMeeting}
+              disabled={isEndingMeeting}
+              className="h-12 w-12 rounded-full bg-red-700 hover:bg-red-800 disabled:opacity-50 flex items-center justify-center transition-colors"
+            >
+              <StopCircle className="h-5 w-5 text-white" />
+            </button>
+            <span className="text-xs text-slate-500">End</span>
+          </div>
+        )}
+        <div className="flex flex-col items-center gap-1">
+          <button
+            onClick={leaveMeeting}
+            className="h-12 w-12 rounded-full bg-red-600 hover:bg-red-700 flex items-center justify-center transition-colors"
+          >
+            <Phone className="h-5 w-5 text-white rotate-[135deg]" />
+          </button>
+          <span className="text-xs text-slate-500">Leave</span>
+        </div>
+      </div>
+    </div>
+  );
+
   return (
-    <div className="min-h-screen bg-slate-950 flex flex-col">
+    // FIX: use h-screen + overflow-hidden so the page never scrolls
+    // The layout is header (fixed height) + video area (flex-1, fills remaining) + controls (fixed height)
+    // Nothing can push controls off screen
+    <div className="h-screen bg-slate-950 flex flex-col overflow-hidden">
+
+      {/* ── Fullscreen overlay ── */}
+      {fullscreenUserId && (
+        <div
+          ref={fullscreenContainerRef}
+          className="fixed inset-0 z-50 bg-black flex flex-col"
+        >
+          {/* Fullscreen video */}
+          <div className="flex-1 min-h-0">
+            {fullscreenUserId === 'local' ? (
+              <LocalTile
+                videoRef={setLocalVideoRef}
+                name={myName}
+                isHost={isHost}
+                isAudioEnabled={isAudioEnabled}
+                isVideoEnabled={isVideoEnabled}
+                isScreenSharing={isScreenSharing}
+                isHandRaised={raisedHands.has(myId)}
+                isPinned={false}
+                onPin={() => {}}
+                onFullscreen={exitFullscreen}
+                isFullscreen
+                large
+              />
+            ) : (
+              <RemoteTile
+                userId={fullscreenUserId}
+                stream={remoteStreams[fullscreenUserId]}
+                name={getParticipantName(fullscreenUserId)}
+                isHandRaised={raisedHands.has(fullscreenUserId)}
+                isPinned={false}
+                onPin={() => {}}
+                onFullscreen={exitFullscreen}
+                isFullscreen
+                large
+              />
+            )}
+          </div>
+          {/* Controls inside fullscreen */}
+          <ControlsBar />
+        </div>
+      )}
+
       {/* Header */}
       <header className="bg-slate-900 border-b border-slate-800 px-4 py-3 flex items-center justify-between shrink-0">
         <div className="flex items-center gap-3">
@@ -532,9 +655,9 @@ export default function MeetingRoom({ meetingId, user }) {
         </div>
       )}
 
-      {/* Main */}
-      <div className="flex-1 flex overflow-hidden">
-        <div className={cn('flex-1 p-3 overflow-auto transition-all duration-200', chatOpen && 'mr-80')}>
+      {/* Main — flex-1 + min-h-0 so it fills space between header and controls without overflow */}
+      <div className="flex-1 min-h-0 flex overflow-hidden">
+        <div className={cn('flex-1 min-w-0 p-3 overflow-hidden transition-all duration-200', chatOpen && 'mr-80')}>
           {pinnedUserId ? (
             <div className="flex flex-col gap-3 h-full">
               <div className="flex-1 min-h-0">
@@ -549,7 +672,7 @@ export default function MeetingRoom({ meetingId, user }) {
                     isHandRaised={raisedHands.has(myId)}
                     isPinned
                     onPin={() => setPinnedUserId(null)}
-                    onFullscreen={() => setFullscreenUserId('local')}
+                    onFullscreen={() => handleFullscreen('local')}
                     large
                   />
                 ) : (
@@ -560,7 +683,7 @@ export default function MeetingRoom({ meetingId, user }) {
                     isHandRaised={raisedHands.has(pinnedUserId)}
                     isPinned
                     onPin={() => setPinnedUserId(null)}
-                    onFullscreen={() => setFullscreenUserId(pinnedUserId)}
+                    onFullscreen={() => handleFullscreen(pinnedUserId)}
                     large
                   />
                 )}
@@ -577,7 +700,7 @@ export default function MeetingRoom({ meetingId, user }) {
                     isHandRaised={raisedHands.has(myId)}
                     isPinned={false}
                     onPin={() => setPinnedUserId('local')}
-                    onFullscreen={() => setFullscreenUserId('local')}
+                    onFullscreen={() => handleFullscreen('local')}
                     thumbnail
                   />
                 )}
@@ -587,7 +710,7 @@ export default function MeetingRoom({ meetingId, user }) {
                     isHandRaised={raisedHands.has(uid)}
                     isPinned={false}
                     onPin={() => setPinnedUserId(uid)}
-                    onFullscreen={() => setFullscreenUserId(uid)}
+                    onFullscreen={() => handleFullscreen(uid)}
                     thumbnail
                   />
                 ))}
@@ -611,7 +734,7 @@ export default function MeetingRoom({ meetingId, user }) {
                 isHandRaised={raisedHands.has(myId)}
                 isPinned={pinnedUserId === 'local'}
                 onPin={() => setPinnedUserId('local')}
-                onFullscreen={() => setFullscreenUserId('local')}
+                onFullscreen={() => handleFullscreen('local')}
               />
               {remoteEntries.map(([uid, stream]) => (
                 <RemoteTile key={uid} userId={uid} stream={stream}
@@ -619,23 +742,23 @@ export default function MeetingRoom({ meetingId, user }) {
                   isHandRaised={raisedHands.has(uid)}
                   isPinned={pinnedUserId === uid}
                   onPin={() => setPinnedUserId(p => p === uid ? null : uid)}
-                  onFullscreen={() => setFullscreenUserId(uid)}
+                  onFullscreen={() => handleFullscreen(uid)}
                 />
               ))}
             </div>
           )}
         </div>
 
-        {/* Chat */}
+        {/* Chat sidebar */}
         {chatOpen && (
-          <div className="w-80 bg-slate-900 border-l border-slate-800 flex flex-col fixed right-0 top-[57px] bottom-[88px] z-10">
-            <div className="p-4 border-b border-slate-800 flex items-center justify-between">
+          <div className="w-80 bg-slate-900 border-l border-slate-800 flex flex-col shrink-0">
+            <div className="p-4 border-b border-slate-800 flex items-center justify-between shrink-0">
               <span className="font-semibold text-slate-200">Chat</span>
               <button onClick={() => setChatOpen(false)} className="text-slate-400 hover:text-slate-200">
                 <X className="h-4 w-4" />
               </button>
             </div>
-            <div className="flex-1 overflow-y-auto p-4 space-y-3">
+            <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3">
               {messages.length === 0 ? (
                 <p className="text-slate-500 text-center text-sm mt-12">No messages yet 👋</p>
               ) : (
@@ -656,7 +779,7 @@ export default function MeetingRoom({ meetingId, user }) {
               )}
               <div ref={chatBottomRef} />
             </div>
-            <form onSubmit={sendChatMessage} className="p-3 border-t border-slate-800 flex gap-2">
+            <form onSubmit={sendChatMessage} className="p-3 border-t border-slate-800 flex gap-2 shrink-0">
               <input
                 type="text"
                 value={chatInput}
@@ -676,64 +799,19 @@ export default function MeetingRoom({ meetingId, user }) {
         )}
       </div>
 
-      {/* Controls */}
-      <div className="bg-slate-900 border-t border-slate-800 px-4 py-3 shrink-0">
-        <div className="flex items-center justify-center gap-2">
-          <CtrlBtn onClick={toggleAudio} label={isAudioEnabled ? 'Mute' : 'Unmute'} danger={!isAudioEnabled}>
-            {isAudioEnabled ? <Mic className="h-5 w-5" /> : <MicOff className="h-5 w-5" />}
-          </CtrlBtn>
-          <CtrlBtn onClick={toggleVideo} label={isVideoEnabled ? 'Stop Video' : 'Start Video'} danger={!isVideoEnabled}>
-            {isVideoEnabled ? <Video className="h-5 w-5" /> : <VideoOff className="h-5 w-5" />}
-          </CtrlBtn>
-          <CtrlBtn onClick={toggleScreenShare} label={isScreenSharing ? 'Stop Share' : 'Share'} highlight={isScreenSharing}>
-            {isScreenSharing ? <StopCircle className="h-5 w-5" /> : <ScreenShare className="h-5 w-5" />}
-          </CtrlBtn>
-          <CtrlBtn onClick={toggleHand} label={isHandRaised ? 'Lower Hand' : 'Raise Hand'} warn={isHandRaised}>
-            <Hand className="h-5 w-5" />
-          </CtrlBtn>
-          {isHost && (
-            <CtrlBtn
-              onClick={isRecording ? stopRecording : startRecording}
-              label={isRecording ? 'Stop Rec' : 'Record'}
-              danger={isRecording}
-            >
-              <Circle className={cn('h-5 w-5', isRecording && 'fill-current')} />
-            </CtrlBtn>
-          )}
-          {isHost && (
-            <div className="flex flex-col items-center gap-1">
-              <button
-                onClick={handleEndMeeting}
-                disabled={isEndingMeeting}
-                className="h-12 w-12 rounded-full bg-red-700 hover:bg-red-800 disabled:opacity-50 flex items-center justify-center transition-colors"
-              >
-                <StopCircle className="h-5 w-5 text-white" />
-              </button>
-              <span className="text-xs text-slate-500">End</span>
-            </div>
-          )}
-          <div className="flex flex-col items-center gap-1">
-            <button
-              onClick={leaveMeeting}
-              className="h-12 w-12 rounded-full bg-red-600 hover:bg-red-700 flex items-center justify-center transition-colors"
-            >
-              <Phone className="h-5 w-5 text-white rotate-[135deg]" />
-            </button>
-            <span className="text-xs text-slate-500">Leave</span>
-          </div>
-        </div>
-      </div>
+      {/* FIX: Controls always at bottom — shrink-0 prevents compression, never scrolls off screen */}
+      <ControlsBar />
     </div>
   );
 }
 
 // ── Local video tile ──
 function LocalTile({ videoRef, name, isHost, isAudioEnabled, isVideoEnabled,
-  isScreenSharing, isHandRaised, isPinned, onPin, onFullscreen, large, thumbnail }) {
+  isScreenSharing, isHandRaised, isPinned, onPin, onFullscreen, large, thumbnail, isFullscreen }) {
   return (
     <div className={cn(
       'relative bg-slate-800 rounded-xl overflow-hidden group',
-      large ? 'w-full h-full' : thumbnail ? 'w-40 h-28 shrink-0' : 'aspect-video'
+      large ? 'w-full h-full' : thumbnail ? 'w-40 h-28 shrink-0' : 'w-full h-full'
     )}>
       <video
         ref={videoRef}
@@ -744,8 +822,8 @@ function LocalTile({ videoRef, name, isHost, isAudioEnabled, isVideoEnabled,
         <TileBtn onClick={onPin} title={isPinned ? 'Unpin' : 'Pin'}>
           {isPinned ? <PinOff className="h-3.5 w-3.5" /> : <Pin className="h-3.5 w-3.5" />}
         </TileBtn>
-        <TileBtn onClick={onFullscreen} title="Fullscreen">
-          <Maximize2 className="h-3.5 w-3.5" />
+        <TileBtn onClick={onFullscreen} title={isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}>
+          {isFullscreen ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
         </TileBtn>
       </div>
       <div className="absolute bottom-0 left-0 right-0 px-2 py-1.5 bg-gradient-to-t from-black/70 to-transparent flex items-center gap-1.5">
@@ -761,7 +839,7 @@ function LocalTile({ videoRef, name, isHost, isAudioEnabled, isVideoEnabled,
 
 // ── Remote video tile ──
 function RemoteTile({ userId, stream, name, isHandRaised, isPinned,
-  onPin, onFullscreen, large, thumbnail }) {
+  onPin, onFullscreen, large, thumbnail, isFullscreen }) {
   const videoRef = useRef(null);
   const [hasVideo, setHasVideo] = useState(false);
   const initials = name.split(' ').map(n => n[0]).join('').slice(0, 2).toUpperCase();
@@ -781,7 +859,7 @@ function RemoteTile({ userId, stream, name, isHandRaised, isPinned,
   return (
     <div className={cn(
       'relative bg-slate-800 rounded-xl overflow-hidden group',
-      large ? 'w-full h-full' : thumbnail ? 'w-40 h-28 shrink-0' : 'aspect-video'
+      large ? 'w-full h-full' : thumbnail ? 'w-40 h-28 shrink-0' : 'w-full h-full'
     )}>
       <video ref={videoRef} autoPlay playsInline
         className={cn('w-full h-full object-cover', !hasVideo && 'hidden')} />
@@ -796,8 +874,8 @@ function RemoteTile({ userId, stream, name, isHandRaised, isPinned,
         <TileBtn onClick={onPin} title={isPinned ? 'Unpin' : 'Pin'}>
           {isPinned ? <PinOff className="h-3.5 w-3.5" /> : <Pin className="h-3.5 w-3.5" />}
         </TileBtn>
-        <TileBtn onClick={onFullscreen} title="Fullscreen">
-          <Maximize2 className="h-3.5 w-3.5" />
+        <TileBtn onClick={onFullscreen} title={isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}>
+          {isFullscreen ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
         </TileBtn>
       </div>
       <div className="absolute bottom-0 left-0 right-0 px-2 py-1.5 bg-gradient-to-t from-black/70 to-transparent flex items-center gap-1.5">
