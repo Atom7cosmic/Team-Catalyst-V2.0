@@ -54,14 +54,14 @@ const logger = winston.createLogger({
 // ── CORS origins — defined FIRST before anything uses them ──────────────────
 const allowedOrigins = [
   'https://orgos-swart.vercel.app',
+  'https://team-catalyst-v2-0.vercel.app', // ✅ added
   'http://localhost:3000',
   'http://localhost:3001',
   process.env.FRONTEND_URL,
-].filter(Boolean); // remove undefined/null entries
+].filter(Boolean);
 
 const corsOptions = {
   origin: function (origin, callback) {
-    // Allow requests with no origin (mobile apps, curl, Postman)
     if (!origin) return callback(null, true);
     if (allowedOrigins.includes(origin)) return callback(null, true);
     callback(new Error('CORS not allowed'));
@@ -74,7 +74,12 @@ const corsOptions = {
 
 // Initialize app
 const app = express();
+
+// ✅ FIX: trust proxy for Railway
+app.set('trust proxy', 1);
+
 const server = http.createServer(app);
+
 const io = new Server(server, {
   cors: {
     origin: allowedOrigins,
