@@ -350,7 +350,13 @@ async function processMeeting(job) {
     // Step 3: Speaker diarization
     await updateStep(meetingId, 'diarization', 'running', 'Identifying speakers', io);
 
-    const attendeeNames = meeting.attendees
+    // Use only attendees who actually joined for speaker count
+    // Passing num_speakers=4 when only 3 spoke causes pyannote to hallucinate a 4th speaker
+    const joinedAttendees = meeting.attendees.filter(
+      a => a.status === 'joined' || a.status === 'present' || a.status === 'left'
+    );
+    const activeAttendees = joinedAttendees.length > 0 ? joinedAttendees : meeting.attendees;
+    const attendeeNames = activeAttendees
       .map(a => {
         const first = (a.user?.firstName || '').trim();
         const last = (a.user?.lastName || '').trim();
@@ -358,7 +364,8 @@ async function processMeeting(job) {
       })
       .filter(name => name.length > 0);
 
-    logger.info(`Attendees for diarization: ${attendeeNames.join(', ')}`);
+    logger.info(`Total: ${meeting.attendees.length}, joined: ${attendeeNames.length} — ${attendeeNames.join(', ')}`);
+
 
     const rawSegments = (groqResult?.segments || []).map(seg => ({
       text: seg.text?.trim() || '',
@@ -606,5 +613,42 @@ const worker = new Worker('meeting-processing', processMeeting, {
 
 worker.on('completed', (job) => logger.info(`Job ${job.id} completed`));
 worker.on('failed', (job, err) => logger.error(`Job ${job.id} failed: ${err.message}`));
+
+
+// ── Fix 3: Keep HuggingFace Space warm ───────────────────────────────────────
+// HF Spaces sleep after 15 min of inactivity — ping every 10 min to prevent this
+const KEEP_ALIVE_INTERVAL = 10 * 60 * 1000;
+
+async function pingDiarizationService() {
+  try {
+    const res = await fetch(`${DIARIZATION_URL}/health`, { timeout: 8000 });
+    const data = await res.json();
+    if (data.pipeline_loaded) {
+      logger.info('Diarization keep-alive: pipeline loaded');
+    } else {
+      logger.warn('Diarization keep-alive: pipeline not loaded yet');
+    }
+  } catch (e) {
+    logger.warn(`Diarization keep-alive failed: ${e.message}`);
+  }
+}
+
+// Ping immediately on worker start then every 10 minutes
+pingDiarizationService();
+const keepAliveTimer = setInterval(pingDiarizationService, KEEP_ALIVE_INTERVAL);
+
+// ── Fix 5: Worker health log every 5 minutes ─────────────────────────────────
+// Prevents Railway from thinking worker is stuck/idle
+const workerHealthTimer = setInterval(() => {
+  logger.info(`Worker alive, uptime: ${Math.round(process.uptime())}s`);
+}, 5 * 60 * 1000);
+
+// Clean up on shutdown
+process.on('SIGTERM', () => {
+  clearInterval(keepAliveTimer);
+  clearInterval(workerHealthTimer);
+  logger.info('Worker shutting down gracefully');
+  process.exit(0);
+});
 
 module.exports = worker;
