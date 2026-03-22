@@ -98,7 +98,7 @@ app.use(morgan('combined', { stream: { write: message => logger.info(message.tri
 
 const generalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 100,
+  max: 1000,
   message: { success: false, message: 'Too many requests, please try again later.' }
 });
 app.use('/api/', generalLimiter);
