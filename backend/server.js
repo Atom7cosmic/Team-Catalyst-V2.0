@@ -98,7 +98,7 @@ app.use(morgan('combined', { stream: { write: message => logger.info(message.tri
 
 const generalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 1000,
+  max: 100,
   message: { success: false, message: 'Too many requests, please try again later.' }
 });
 app.use('/api/', generalLimiter);
@@ -180,13 +180,16 @@ io.on('connection', (socket) => {
     const displayName = getDisplayName();
     participants[userId] = displayName;
 
-    room.users.push({ socketId: socket.id, userId, displayName });
+    room.users.push({ socketId: socket.id, userId: userId?.toString(), displayName });
 
     // Tell other participants this person joined (with their name)
     socket.to(meetingId).emit('user-connected', userId);
 
     // Send existing users list + participant names map to the new joiner
-    socket.emit('existing-users', room.users.filter(u => u.socketId !== socket.id));
+    socket.emit('existing-users', room.users
+      .filter(u => u.socketId !== socket.id)
+      .map(u => ({ userId: u.userId?.toString(), displayName: u.displayName }))
+    );
     socket.emit('participant-names', participants); // ← NEW: send full name map
     socket.emit('recording-status', room.recording);
 
