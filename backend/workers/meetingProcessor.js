@@ -462,8 +462,11 @@ async function processMeeting(job) {
     });
     meeting.followUpTopics = analysis.followUpTopics || [];
 
+    // ── FIX: store attendee name alongside user ID so the frontend can display it
+    meeting.attendeeContributions = [];
+
     for (const attendee of meeting.attendees) {
-      const name = `${attendee.user?.firstName} ${attendee.user?.lastName}`;
+      const name = `${attendee.user?.firstName} ${attendee.user?.lastName}`.trim();
       try {
         const contribution = await scoreAttendeeChain(
           name,
@@ -474,15 +477,25 @@ async function processMeeting(job) {
         const score = (contribution.score && !isNaN(contribution.score)) ? contribution.score : 5;
         attendee.contributionScore = score;
         attendee.keyPoints = contribution.keyPoints || [];
-        meeting.attendeeContributions = meeting.attendeeContributions || [];
+
+        // ✅ FIX: include 'name' field so the frontend never falls back to "Unknown"
         meeting.attendeeContributions.push({
           user: attendee.user._id,
+          name,                               // <── was missing before
           score,
           keyPoints: contribution.keyPoints || [],
           speakingTime: 0
         });
       } catch (e) {
         logger.warn(`Score failed for ${name}: ${e.message}`);
+        // Still push a fallback entry so the attendee appears in the list
+        meeting.attendeeContributions.push({
+          user: attendee.user._id,
+          name,
+          score: 5,
+          keyPoints: [],
+          speakingTime: 0
+        });
       }
     }
 

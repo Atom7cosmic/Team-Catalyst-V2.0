@@ -56,21 +56,21 @@ export default function MeetingDetailPage({ params }) {
   }, [meeting?.status]);
 
   const fetchMeeting = async () => {
-    if (!params?.id) return;
-    try {
-      const response = await api.get(`/meetings/${params.id}`);
-      setMeeting(response.data.meeting);
-      setTranscriptSegments(response.data.meeting?.transcriptSegments || []);
-      if (response.data.meeting?.status === 'processing') {
-        fetchProcessingStatus();
-      }
-    } catch (error) {
-      console.error('Failed to fetch meeting:', error);
-      toast.error('Failed to fetch meeting details');
-    } finally {
-      setIsLoading(false);
+  if (!params?.id) return;
+  try {
+    const response = await api.get(`/meetings/${params.id}`);
+    setMeeting(response.data.meeting);
+    setTranscriptSegments(response.data.meeting?.transcriptSegments || []);
+    if (response.data.meeting?.status === 'processing') {
+      fetchProcessingStatus();
     }
-  };
+  } catch (error) {
+    console.error('Failed to fetch meeting:', error);
+    toast.error('Failed to fetch meeting details');
+  } finally {
+    setIsLoading(false);
+  }
+};
 
   const fetchProcessingStatus = async () => {
     try {
@@ -129,7 +129,23 @@ export default function MeetingDetailPage({ params }) {
     }
   };
 
-  // ── Helper: build shared content sections ──────────────────────────────────
+  // ── FIX: helper to resolve attendee contribution name from populated user object ──
+  const getContributionName = (c) => {
+    // 1. populated user object
+    if (c.user?.firstName) return `${c.user.firstName} ${c.user.lastName || ''}`.trim();
+    // 2. stored name field
+    if (c.name) return c.name;
+    // 3. match against attendees array by user ID (works for ALL old meetings)
+    const cId = c.user?._id?.toString() || c.user?.id?.toString() || c.user?.toString() || '';
+    const matched = (meeting?.attendees || []).find(a => {
+      const aId = a.user?._id?.toString() || a.user?.id?.toString() || '';
+      return aId === cId;
+    });
+    if (matched?.user?.firstName) return `${matched.user.firstName} ${matched.user.lastName || ''}`.trim();
+    return 'Unknown';
+  };
+
+  // ── Helper: build shared content sections ──
   const buildExportSections = () => {
     if (!meeting) return '';
     const meetingDate = meeting.scheduledDate ? format(new Date(meeting.scheduledDate), 'MMM d, yyyy') : '';
@@ -150,28 +166,28 @@ export default function MeetingDetailPage({ params }) {
 
     const transcript = transcriptSegments.length > 0
       ? transcriptSegments.map(seg => {
-          const mins = Math.floor((seg.startTime || 0) / 60);
-          const secs = ((seg.startTime || 0) % 60).toString().padStart(2, '0');
-          return `  [${mins}:${secs}] ${seg.speaker}: ${seg.text}`;
-        }).join('\n')
+        const mins = Math.floor((seg.startTime || 0) / 60);
+        const secs = ((seg.startTime || 0) % 60).toString().padStart(2, '0');
+        return `  [${mins}:${secs}] ${seg.speaker}: ${seg.text}`;
+      }).join('\n')
       : (meeting.transcriptRaw || 'No transcript available');
 
+    // ✅ FIX: use getContributionName instead of c.name
     const contributions = (meeting.attendeeContributions || []).map(c => {
       const score = c.contributionScore ?? c.score ?? 0;
       const kp = Array.isArray(c.keyPoints) ? c.keyPoints.join('; ') : (c.keyPoints || '—');
-      return `  ${c.name || 'Unknown'}: Score ${score}/10 | Key Points: ${kp}`;
+      return `  ${getContributionName(c)}: Score ${score}/10 | Key Points: ${kp}`;
     }).join('\n');
 
     return { meetingDate, duration, attendeeNames, conclusions, decisions, followUps, actions, transcript, contributions };
   };
 
-  // ── PDF EXPORT ─────────────────────────────────────────────────────────────
+  // ── PDF EXPORT ──
   const handleExportPDF = async () => {
     if (!meeting) return;
     const loadingToast = toast.loading('Generating PDF...');
 
     try {
-      // Load jsPDF from CDN
       await new Promise((resolve, reject) => {
         if (window.jspdf) return resolve();
         const script = document.createElement('script');
@@ -196,10 +212,7 @@ export default function MeetingDetailPage({ params }) {
       const LIGHT = [240, 240, 248];
 
       const checkPage = (needed = 10) => {
-        if (y + needed > 275) {
-          doc.addPage();
-          y = 20;
-        }
+        if (y + needed > 275) { doc.addPage(); y = 20; }
       };
 
       const sectionHeader = (title) => {
@@ -219,11 +232,7 @@ export default function MeetingDetailPage({ params }) {
       const bodyText = (text, indent = 0) => {
         if (!text) return;
         const lines = doc.splitTextToSize(text, contentW - indent);
-        lines.forEach(line => {
-          checkPage(6);
-          doc.text(line, margin + indent, y);
-          y += 5.5;
-        });
+        lines.forEach(line => { checkPage(6); doc.text(line, margin + indent, y); y += 5.5; });
         y += 1;
       };
 
@@ -240,15 +249,11 @@ export default function MeetingDetailPage({ params }) {
         doc.text(lines[0], margin + 38, y);
         y += 5.5;
         if (lines.length > 1) {
-          lines.slice(1).forEach(l => {
-            checkPage(6);
-            doc.text(l, margin + 38, y);
-            y += 5.5;
-          });
+          lines.slice(1).forEach(l => { checkPage(6); doc.text(l, margin + 38, y); y += 5.5; });
         }
       };
 
-      // ── HEADER ──
+      // HEADER
       doc.setFillColor(...DARK);
       doc.rect(0, 0, 210, 32, 'F');
       doc.setTextColor(255, 255, 255);
@@ -261,7 +266,7 @@ export default function MeetingDetailPage({ params }) {
       doc.text(`${meeting.name || ''}  •  ${s.meetingDate}  •  ${meeting.domain || ''}`, margin, 24);
       y = 42;
 
-      // ── MEETING DETAILS ──
+      // MEETING DETAILS
       doc.setFillColor(...LIGHT);
       doc.roundedRect(margin, y, contentW, 36, 3, 3, 'F');
       y += 6;
@@ -274,23 +279,23 @@ export default function MeetingDetailPage({ params }) {
       labelValue('Attendees', s.attendeeNames);
       y += 4;
 
-      // ── SUMMARY ──
+      // SUMMARY
       sectionHeader('Summary');
       bodyText(meeting.summary || 'No summary available.');
 
-      // ── CONCLUSIONS ──
+      // CONCLUSIONS
       if (meeting.conclusions?.length > 0) {
         sectionHeader('Key Conclusions');
         meeting.conclusions.forEach((c, i) => bodyText(`${i + 1}. ${c}`, 4));
       }
 
-      // ── DECISIONS ──
+      // DECISIONS
       if (meeting.decisions?.length > 0) {
         sectionHeader('Decisions');
         meeting.decisions.forEach((d, i) => bodyText(`${i + 1}. ${d}`, 4));
       }
 
-      // ── ACTION ITEMS ──
+      // ACTION ITEMS
       sectionHeader('Action Items');
       if (meeting.actionItems?.length > 0) {
         meeting.actionItems.forEach((item, i) => {
@@ -314,18 +319,19 @@ export default function MeetingDetailPage({ params }) {
         bodyText('No action items recorded.');
       }
 
-      // ── FOLLOW-UP TOPICS ──
+      // FOLLOW-UP TOPICS
       if (meeting.followUpTopics?.length > 0) {
         sectionHeader('Follow-up Topics');
         meeting.followUpTopics.forEach((f, i) => bodyText(`${i + 1}. ${f}`, 4));
       }
 
-      // ── ATTENDEE CONTRIBUTIONS ──
+      // ATTENDEE CONTRIBUTIONS ✅ FIX: use getContributionName
       if (meeting.attendeeContributions?.length > 0) {
         sectionHeader('Attendee Contributions');
         meeting.attendeeContributions.forEach(c => {
           const score = c.contributionScore ?? c.score ?? 0;
           const kp = Array.isArray(c.keyPoints) ? c.keyPoints.join('; ') : (c.keyPoints || '—');
+          const name = getContributionName(c); // ✅ FIXED
           checkPage(12);
           const barColor = score >= 8 ? [46, 125, 50] : score >= 5 ? [230, 81, 0] : [183, 28, 28];
           doc.setFillColor(245, 245, 252);
@@ -333,7 +339,7 @@ export default function MeetingDetailPage({ params }) {
           doc.setFont('helvetica', 'bold');
           doc.setFontSize(9.5);
           doc.setTextColor(...DARK);
-          doc.text(c.name || 'Unknown', margin + 4, y + 4.5);
+          doc.text(name, margin + 4, y + 4.5); // ✅ FIXED
           doc.setFillColor(...barColor);
           doc.roundedRect(margin + contentW - 22, y + 2, (score / 10) * 18, 7, 1, 1, 'F');
           doc.setTextColor(255, 255, 255);
@@ -348,7 +354,7 @@ export default function MeetingDetailPage({ params }) {
         });
       }
 
-      // ── TRANSCRIPT ──
+      // TRANSCRIPT
       sectionHeader('Transcript');
       if (transcriptSegments.length > 0) {
         transcriptSegments.forEach(seg => {
@@ -367,27 +373,17 @@ export default function MeetingDetailPage({ params }) {
           doc.setTextColor(...DARK);
           doc.setFontSize(9);
           const lines = doc.splitTextToSize(seg.text || '', contentW - 4);
-          lines.forEach(line => {
-            checkPage(5);
-            doc.text(line, margin + 2, y);
-            y += 4.8;
-          });
+          lines.forEach(line => { checkPage(5); doc.text(line, margin + 2, y); y += 4.8; });
           y += 1;
         });
       } else if (meeting.transcriptRaw) {
         const rawLines = doc.splitTextToSize(meeting.transcriptRaw, contentW);
-        rawLines.forEach(line => {
-          checkPage(5);
-          doc.setFontSize(9);
-          doc.setTextColor(...DARK);
-          doc.text(line, margin, y);
-          y += 4.8;
-        });
+        rawLines.forEach(line => { checkPage(5); doc.setFontSize(9); doc.setTextColor(...DARK); doc.text(line, margin, y); y += 4.8; });
       } else {
         bodyText('No transcript available.');
       }
 
-      // ── FOOTER on each page ──
+      // FOOTER
       const totalPages = doc.internal.getNumberOfPages();
       for (let i = 1; i <= totalPages; i++) {
         doc.setPage(i);
@@ -411,46 +407,40 @@ export default function MeetingDetailPage({ params }) {
     }
   };
 
-  // ── DOCX EXPORT ────────────────────────────────────────────────────────────
+  // ── DOCX EXPORT ──
   const handleExportDOCX = async () => {
     if (!meeting) return;
     const loadingToast = toast.loading('Generating DOCX...');
 
     try {
-      // Load docx library from CDN — try multiple sources for reliability
       await new Promise((resolve, reject) => {
         if (window.docx && window.docx.Document) return resolve();
-        // Remove any previously failed script tag
         const existing = document.getElementById('docx-cdn');
         if (existing) existing.remove();
         const script = document.createElement('script');
         script.id = 'docx-cdn';
         script.src = 'https://unpkg.com/docx@8.2.2/build/index.umd.js';
         script.onload = () => {
-          // unpkg exposes as window.docx
           if (window.docx && window.docx.Document) return resolve();
           reject(new Error('docx library loaded but Document not found on window.docx'));
         };
         script.onerror = () => {
-          // Fallback to cdnjs
           const s2 = document.createElement('script');
           s2.src = 'https://cdnjs.cloudflare.com/ajax/libs/docx/7.8.2/docx.umd.min.js';
           s2.onload = () => resolve();
-          s2.onerror = () => reject(new Error('Failed to load docx library from all CDN sources'));
+          s2.onerror = () => reject(new Error('Failed to load docx library'));
           document.head.appendChild(s2);
         };
         document.head.appendChild(script);
       });
 
       const docxLib = window.docx;
-      if (!docxLib || !docxLib.Document) {
-        throw new Error('docx library not available — please check your internet connection and try again');
-      }
+      if (!docxLib || !docxLib.Document) throw new Error('docx library not available');
 
       const {
         Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell,
         HeadingLevel, AlignmentType, BorderStyle, WidthType, ShadingType,
-        LevelFormat, VerticalAlign, PageNumber, Header, Footer
+        VerticalAlign, Header, Footer
       } = docxLib;
 
       const s = buildExportSections();
@@ -461,40 +451,23 @@ export default function MeetingDetailPage({ params }) {
 
       const border = { style: BorderStyle.SINGLE, size: 1, color: 'D0CEEE' };
       const borders = { top: border, bottom: border, left: border, right: border };
-      const noBorders = {
-        top: { style: BorderStyle.NONE, size: 0, color: 'FFFFFF' },
-        bottom: { style: BorderStyle.NONE, size: 0, color: 'FFFFFF' },
-        left: { style: BorderStyle.NONE, size: 0, color: 'FFFFFF' },
-        right: { style: BorderStyle.NONE, size: 0, color: 'FFFFFF' },
-      };
 
       const sectionHeading = (text) => new Paragraph({
         spacing: { before: 280, after: 100 },
         shading: { fill: ACCENT_COLOR, type: ShadingType.CLEAR },
-        children: [
-          new TextRun({
-            text,
-            bold: true,
-            color: 'FFFFFF',
-            size: 22,
-            font: 'Arial',
-          })
-        ],
+        children: [new TextRun({ text, bold: true, color: 'FFFFFF', size: 22, font: 'Arial' })],
         indent: { left: 120, right: 120 },
       });
 
       const bodyPara = (text, opts = {}) => new Paragraph({
         spacing: { before: 60, after: 60 },
-        children: [
-          new TextRun({
-            text: text || '',
-            size: 20,
-            font: 'Arial',
-            color: opts.muted ? GREY_COLOR : DARK_COLOR,
-            italics: opts.italic || false,
-            bold: opts.bold || false,
-          })
-        ],
+        children: [new TextRun({
+          text: text || '',
+          size: 20, font: 'Arial',
+          color: opts.muted ? GREY_COLOR : DARK_COLOR,
+          italics: opts.italic || false,
+          bold: opts.bold || false,
+        })],
         indent: opts.indent ? { left: opts.indent } : undefined,
       });
 
@@ -513,15 +486,13 @@ export default function MeetingDetailPage({ params }) {
         rows: rows.map(([label, value]) => new TableRow({
           children: [
             new TableCell({
-              borders,
-              width: { size: 2200, type: WidthType.DXA },
+              borders, width: { size: 2200, type: WidthType.DXA },
               shading: { fill: LIGHT_BG, type: ShadingType.CLEAR },
               margins: { top: 80, bottom: 80, left: 120, right: 120 },
               children: [new Paragraph({ children: [new TextRun({ text: label, bold: true, size: 18, color: GREY_COLOR, font: 'Arial' })] })]
             }),
             new TableCell({
-              borders,
-              width: { size: 7160, type: WidthType.DXA },
+              borders, width: { size: 7160, type: WidthType.DXA },
               margins: { top: 80, bottom: 80, left: 120, right: 120 },
               children: [new Paragraph({ children: [new TextRun({ text: value || '—', size: 20, font: 'Arial', color: DARK_COLOR })] })]
             }),
@@ -564,24 +535,16 @@ export default function MeetingDetailPage({ params }) {
         });
       };
 
-      // Build all content children
       const children = [
-        // Title block
         new Paragraph({
           spacing: { before: 0, after: 160 },
           shading: { fill: DARK_COLOR, type: ShadingType.CLEAR },
-          children: [
-            new TextRun({ text: meeting.name || 'Meeting Report', bold: true, size: 44, color: 'FFFFFF', font: 'Arial' }),
-          ]
+          children: [new TextRun({ text: meeting.name || 'Meeting Report', bold: true, size: 44, color: 'FFFFFF', font: 'Arial' })]
         }),
         new Paragraph({
           spacing: { before: 0, after: 320 },
-          children: [
-            new TextRun({ text: `${s.meetingDate}  •  ${meeting.domain || ''}  •  ${s.duration}`, size: 20, color: GREY_COLOR, font: 'Arial', italics: true }),
-          ]
+          children: [new TextRun({ text: `${s.meetingDate}  •  ${meeting.domain || ''}  •  ${s.duration}`, size: 20, color: GREY_COLOR, font: 'Arial', italics: true })]
         }),
-
-        // Meeting Details
         sectionHeading('📋  Meeting Details'),
         new Paragraph({ spacing: { before: 100, after: 100 } }),
         infoTable([
@@ -593,37 +556,31 @@ export default function MeetingDetailPage({ params }) {
           ['Attendees', s.attendeeNames],
         ]),
         new Paragraph({ spacing: { before: 200, after: 0 } }),
-
-        // Summary
         sectionHeading('📝  Summary'),
         bodyPara(meeting.summary || 'No summary available.', { italic: !meeting.summary, muted: !meeting.summary }),
       ];
 
-      // Conclusions
       if (meeting.conclusions?.length > 0) {
         children.push(sectionHeading('💡  Key Conclusions'));
         meeting.conclusions.forEach((c, i) => children.push(numberedItem(c, i + 1)));
       }
 
-      // Decisions
       if (meeting.decisions?.length > 0) {
         children.push(sectionHeading('⚖️  Decisions'));
         meeting.decisions.forEach((d, i) => children.push(numberedItem(d, i + 1)));
       }
 
-      // Action Items
       children.push(sectionHeading('✅  Action Items'));
       children.push(new Paragraph({ spacing: { before: 100, after: 100 } }));
       children.push(actionTable(meeting.actionItems));
       children.push(new Paragraph({ spacing: { before: 200, after: 0 } }));
 
-      // Follow-up Topics
       if (meeting.followUpTopics?.length > 0) {
         children.push(sectionHeading('🔁  Follow-up Topics'));
         meeting.followUpTopics.forEach((f, i) => children.push(numberedItem(f, i + 1)));
       }
 
-      // Attendee Contributions
+      // ✅ FIX: use getContributionName in DOCX
       if (meeting.attendeeContributions?.length > 0) {
         children.push(sectionHeading('👥  Attendee Contributions'));
         children.push(new Paragraph({ spacing: { before: 100, after: 100 } }));
@@ -647,9 +604,10 @@ export default function MeetingDetailPage({ params }) {
               const kp = Array.isArray(c.keyPoints) ? c.keyPoints.join('; ') : (c.keyPoints || '—');
               const scoreColor = score >= 8 ? '2E7D32' : score >= 5 ? 'E65100' : 'B71C1C';
               const bg = i % 2 === 0 ? 'FFFFFF' : 'F5F4FF';
+              const name = getContributionName(c); // ✅ FIXED
               return new TableRow({
                 children: [
-                  new TableCell({ borders, width: { size: 2800, type: WidthType.DXA }, shading: { fill: bg, type: ShadingType.CLEAR }, margins: { top: 80, bottom: 80, left: 120, right: 120 }, children: [new Paragraph({ children: [new TextRun({ text: c.name || '—', size: 19, bold: true, font: 'Arial', color: DARK_COLOR })] })] }),
+                  new TableCell({ borders, width: { size: 2800, type: WidthType.DXA }, shading: { fill: bg, type: ShadingType.CLEAR }, margins: { top: 80, bottom: 80, left: 120, right: 120 }, children: [new Paragraph({ children: [new TextRun({ text: name, size: 19, bold: true, font: 'Arial', color: DARK_COLOR })] })] }),
                   new TableCell({ borders, width: { size: 1200, type: WidthType.DXA }, shading: { fill: bg, type: ShadingType.CLEAR }, margins: { top: 80, bottom: 80, left: 120, right: 120 }, verticalAlign: VerticalAlign.CENTER, children: [new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: `${score}/10`, size: 22, bold: true, font: 'Arial', color: scoreColor })] })] }),
                   new TableCell({ borders, width: { size: 5360, type: WidthType.DXA }, shading: { fill: bg, type: ShadingType.CLEAR }, margins: { top: 80, bottom: 80, left: 120, right: 120 }, children: [new Paragraph({ children: [new TextRun({ text: kp, size: 18, font: 'Arial', color: GREY_COLOR })] })] }),
                 ]
@@ -660,7 +618,6 @@ export default function MeetingDetailPage({ params }) {
         children.push(new Paragraph({ spacing: { before: 200, after: 0 } }));
       }
 
-      // Transcript
       children.push(sectionHeading('🎙️  Transcript'));
       if (transcriptSegments.length > 0) {
         transcriptSegments.forEach(seg => {
@@ -686,9 +643,7 @@ export default function MeetingDetailPage({ params }) {
       }
 
       const doc = new Document({
-        styles: {
-          default: { document: { run: { font: 'Arial', size: 20 } } },
-        },
+        styles: { default: { document: { run: { font: 'Arial', size: 20 } } } },
         sections: [{
           properties: {
             page: {
@@ -698,36 +653,29 @@ export default function MeetingDetailPage({ params }) {
           },
           headers: {
             default: new Header({
-              children: [
-                new Paragraph({
-                  border: { bottom: { style: BorderStyle.SINGLE, size: 6, color: ACCENT_COLOR, space: 4 } },
-                  spacing: { after: 0 },
-                  children: [
-                    new TextRun({ text: 'OrgOS  •  Meeting Report', bold: true, color: ACCENT_COLOR, size: 18, font: 'Arial' }),
-                    new TextRun({ text: `  |  ${meeting.name || ''}`, color: GREY_COLOR, size: 18, font: 'Arial' }),
-                  ]
-                })
-              ]
+              children: [new Paragraph({
+                border: { bottom: { style: BorderStyle.SINGLE, size: 6, color: ACCENT_COLOR, space: 4 } },
+                spacing: { after: 0 },
+                children: [
+                  new TextRun({ text: 'OrgOS  •  Meeting Report', bold: true, color: ACCENT_COLOR, size: 18, font: 'Arial' }),
+                  new TextRun({ text: `  |  ${meeting.name || ''}`, color: GREY_COLOR, size: 18, font: 'Arial' }),
+                ]
+              })]
             })
           },
           footers: {
             default: new Footer({
-              children: [
-                new Paragraph({
-                  border: { top: { style: BorderStyle.SINGLE, size: 4, color: 'D0D0E8', space: 4 } },
-                  spacing: { before: 0 },
-                  children: [
-                    new TextRun({ text: 'Generated by OrgOS  •  AI-Powered Organization Operating System', color: GREY_COLOR, size: 16, font: 'Arial' }),
-                  ]
-                })
-              ]
+              children: [new Paragraph({
+                border: { top: { style: BorderStyle.SINGLE, size: 4, color: 'D0D0E8', space: 4 } },
+                spacing: { before: 0 },
+                children: [new TextRun({ text: 'Generated by OrgOS  •  AI-Powered Organization Operating System', color: GREY_COLOR, size: 16, font: 'Arial' })]
+              })]
             })
           },
           children,
         }]
       });
 
-      // Use toBlob() not toBuffer() — toBuffer() is Node.js only, not supported in browsers
       const blob = await Packer.toBlob(doc);
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
@@ -747,28 +695,27 @@ export default function MeetingDetailPage({ params }) {
       toast.error('DOCX export failed. Please try again.');
     }
   };
-  // ───────────────────────────────────────────────────────────────────────────
 
   const getStatusColor = (status) => {
     switch (status) {
-      case 'ready':     return 'bg-green-500/20 text-green-400';
-      case 'processing':return 'bg-yellow-500/20 text-yellow-400';
+      case 'ready': return 'bg-green-500/20 text-green-400';
+      case 'processing': return 'bg-yellow-500/20 text-yellow-400';
       case 'scheduled': return 'bg-blue-500/20 text-blue-400';
-      case 'live':      return 'bg-red-500/20 text-red-400';
+      case 'live': return 'bg-red-500/20 text-red-400';
       case 'cancelled': return 'bg-red-900/20 text-red-700';
       case 'completed': return 'bg-slate-500/20 text-muted-foreground';
-      default:          return 'bg-slate-500/20 text-muted-foreground';
+      default: return 'bg-slate-500/20 text-muted-foreground';
     }
   };
 
   const getDomainColor = (domain) => {
     const colors = {
-      'Sprint Planning':          'bg-blue-500/20 text-blue-400',
-      'Performance Review':       'bg-green-500/20 text-green-400',
-      'Architecture Discussion':  'bg-purple-500/20 text-purple-400',
-      '1:1':                      'bg-yellow-500/20 text-yellow-400',
-      'All-Hands':                'bg-red-500/20 text-red-400',
-      'Custom':                   'bg-slate-500/20 text-muted-foreground'
+      'Sprint Planning': 'bg-blue-500/20 text-blue-400',
+      'Performance Review': 'bg-green-500/20 text-green-400',
+      'Architecture Discussion': 'bg-purple-500/20 text-purple-400',
+      '1:1': 'bg-yellow-500/20 text-yellow-400',
+      'All-Hands': 'bg-red-500/20 text-red-400',
+      'Custom': 'bg-slate-500/20 text-muted-foreground'
     };
     return colors[domain] || colors['Custom'];
   };
@@ -813,17 +760,13 @@ export default function MeetingDetailPage({ params }) {
     <DashboardLayout>
       <div className="space-y-6">
 
-        {/* Cancelled banner */}
         {meeting.status === 'cancelled' && (
           <div className="bg-red-900/20 border border-red-800/50 rounded-lg p-4 flex items-center gap-3">
             <AlertCircle className="h-5 w-5 text-red-400 shrink-0" />
-            <p className="text-red-300 text-sm">
-              This meeting has been cancelled by the host.
-            </p>
+            <p className="text-red-300 text-sm">This meeting has been cancelled by the host.</p>
           </div>
         )}
 
-        {/* Header */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div className="flex items-center gap-4">
             <Button variant="ghost" size="icon" onClick={() => router.push('/meetings/history')}>
@@ -832,81 +775,51 @@ export default function MeetingDetailPage({ params }) {
             <div>
               <div className="flex items-center gap-3">
                 <h1 className="text-2xl font-bold">{meeting.name}</h1>
-                <Badge className={getStatusColor(meeting.status)}>
-                  {meeting.status}
-                </Badge>
+                <Badge className={getStatusColor(meeting.status)}>{meeting.status}</Badge>
               </div>
               <p className="text-muted-foreground">{meeting.description}</p>
             </div>
           </div>
 
           <div className="flex gap-2 flex-wrap">
-            {/* ── PDF Export ── */}
             {isReady && (
               <Button variant="outline" onClick={handleExportPDF} className="border-slate-700">
                 <Download className="mr-2 h-4 w-4" />
                 Export PDF
               </Button>
             )}
-
-            {/* ── DOCX Export ── */}
             {isReady && (
               <Button variant="outline" onClick={handleExportDOCX} className="border-slate-700">
                 <FileDown className="mr-2 h-4 w-4" />
                 Export DOCX
               </Button>
             )}
-
             {meeting.status === 'scheduled' && (
-              <Button
-                onClick={() => router.push(`/meetings/${meeting._id}/room`)}
-                className="bg-green-600 hover:bg-green-700"
-              >
+              <Button onClick={() => router.push(`/meetings/${meeting._id}/room`)} className="bg-green-600 hover:bg-green-700">
                 <Mic className="mr-2 h-4 w-4" />
                 Join Meeting
               </Button>
             )}
-
             {meeting.status === 'live' && (
-              <Button
-                onClick={() => router.push(`/meetings/${meeting._id}/room`)}
-                className="bg-green-600 hover:bg-green-700"
-              >
+              <Button onClick={() => router.push(`/meetings/${meeting._id}/room`)} className="bg-green-600 hover:bg-green-700">
                 <Mic className="mr-2 h-4 w-4" />
                 Rejoin Meeting
               </Button>
             )}
-
             {(meeting.status === 'live' || meeting.status === 'scheduled') && isHost && (
-              <Button
-                onClick={handleEndMeeting}
-                disabled={isEnding}
-                className="bg-red-600 hover:bg-red-700"
-              >
-                {isEnding
-                  ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  : <StopCircle className="mr-2 h-4 w-4" />
-                }
+              <Button onClick={handleEndMeeting} disabled={isEnding} className="bg-red-600 hover:bg-red-700">
+                {isEnding ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <StopCircle className="mr-2 h-4 w-4" />}
                 End Meeting
               </Button>
             )}
-
             {['ready', 'completed', 'processing'].includes(meeting.status) && (
-              <Button
-                variant="outline"
-                className="border-slate-700"
-                onClick={() => setActiveTab('summary')}
-              >
+              <Button variant="outline" className="border-slate-700" onClick={() => setActiveTab('summary')}>
                 <FileText className="mr-2 h-4 w-4" />
                 View Summary
               </Button>
             )}
-
             {isReady && (
-              <Button
-                onClick={() => router.push(`/meetings/${meeting._id}/schedule-followup`)}
-                className="bg-blue-600 hover:bg-blue-700"
-              >
+              <Button onClick={() => router.push(`/meetings/${meeting._id}/schedule-followup`)} className="bg-blue-600 hover:bg-blue-700">
                 <Plus className="mr-2 h-4 w-4" />
                 Schedule Follow-up
               </Button>
@@ -914,19 +827,14 @@ export default function MeetingDetailPage({ params }) {
           </div>
         </div>
 
-        {/* Processing Indicator */}
         {isProcessing && processingStatus && (
           <Card className="bg-card border-muted border-yellow-500/30">
             <CardContent className="py-6">
-              <ProcessingStepIndicator
-                processingSteps={processingStatus.processingSteps}
-                error={processingStatus.error}
-              />
+              <ProcessingStepIndicator processingSteps={processingStatus.processingSteps} error={processingStatus.error} />
             </CardContent>
           </Card>
         )}
 
-        {/* Meeting Info Cards */}
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
           <Card className="bg-card border-muted">
             <CardContent className="flex items-center gap-3 py-4">
@@ -976,7 +884,6 @@ export default function MeetingDetailPage({ params }) {
                 <TabsTrigger value="action-items">Action Items</TabsTrigger>
               </TabsList>
 
-              {/* SUMMARY TAB */}
               <TabsContent value="summary">
                 <Card className="bg-card border-muted">
                   <CardHeader>
@@ -993,9 +900,7 @@ export default function MeetingDetailPage({ params }) {
                           <div>
                             <p className="font-medium mb-2">Key Conclusions:</p>
                             <ul className="list-disc list-inside space-y-1 text-muted-foreground">
-                              {meeting.conclusions.map((conclusion, i) => (
-                                <li key={i}>{conclusion}</li>
-                              ))}
+                              {meeting.conclusions.map((c, i) => <li key={i}>{c}</li>)}
                             </ul>
                           </div>
                         )}
@@ -1003,39 +908,29 @@ export default function MeetingDetailPage({ params }) {
                           <div>
                             <p className="font-medium mb-2">Decisions:</p>
                             <ul className="list-disc list-inside space-y-1 text-muted-foreground">
-                              {meeting.decisions.map((decision, i) => (
-                                <li key={i}>{decision}</li>
-                              ))}
+                              {meeting.decisions.map((d, i) => <li key={i}>{d}</li>)}
                             </ul>
                           </div>
                         )}
                       </>
                     ) : (
                       <p className="text-slate-500">
-                        {isProcessing
-                          ? 'Summary will be available after processing...'
-                          : meeting.status === 'cancelled'
-                          ? 'Meeting was cancelled — no summary available.'
-                          : 'No summary available'}
+                        {isProcessing ? 'Summary will be available after processing...'
+                          : meeting.status === 'cancelled' ? 'Meeting was cancelled — no summary available.'
+                            : 'No summary available'}
                       </p>
                     )}
                   </CardContent>
                 </Card>
               </TabsContent>
 
-              {/* TRANSCRIPT TAB — with inline speaker correction */}
               <TabsContent value="transcript">
                 <Card className="bg-card border-muted">
                   <CardHeader>
                     <div className="flex items-center justify-between">
                       <CardTitle>Transcript</CardTitle>
                       {transcriptHasChanges && (
-                        <Button
-                          size="sm"
-                          onClick={handleSaveTranscript}
-                          disabled={isSavingTranscript}
-                          className="bg-blue-600 hover:bg-blue-700"
-                        >
+                        <Button size="sm" onClick={handleSaveTranscript} disabled={isSavingTranscript} className="bg-blue-600 hover:bg-blue-700">
                           {isSavingTranscript && <Loader2 className="mr-2 h-3 w-3 animate-spin" />}
                           {isSavingTranscript ? 'Saving...' : 'Save corrections'}
                         </Button>
@@ -1045,9 +940,7 @@ export default function MeetingDetailPage({ params }) {
                   <CardContent>
                     {transcriptSegments.length > 0 ? (
                       <div className="space-y-2">
-                        <p className="text-xs text-slate-500 mb-3">
-                          AI has assigned speakers. Click any name to correct it.
-                        </p>
+                        <p className="text-xs text-slate-500 mb-3">AI has assigned speakers. Click any name to correct it.</p>
                         <ScrollArea className="h-[400px]">
                           <div className="space-y-3 pr-2">
                             {transcriptSegments.map((seg, i) => (
@@ -1066,10 +959,7 @@ export default function MeetingDetailPage({ params }) {
                                         ))}
                                         <option value="Unknown Speaker">Unknown Speaker</option>
                                       </select>
-                                      <button
-                                        onClick={() => setEditingSegmentIdx(null)}
-                                        className="text-slate-400 hover:text-slate-200 ml-1"
-                                      >
+                                      <button onClick={() => setEditingSegmentIdx(null)} className="text-slate-400 hover:text-slate-200 ml-1">
                                         <X className="h-3 w-3" />
                                       </button>
                                     </div>
@@ -1096,9 +986,7 @@ export default function MeetingDetailPage({ params }) {
                     ) : meeting?.transcriptRaw ? (
                       <ScrollArea className="h-[400px]">
                         <div className="p-3 bg-muted/50 rounded-lg">
-                          <p className="text-xs text-slate-500 mb-2">
-                            Speaker detection not available — showing raw transcript.
-                          </p>
+                          <p className="text-xs text-slate-500 mb-2">Speaker detection not available — showing raw transcript.</p>
                           <p className="text-slate-300 whitespace-pre-wrap text-sm">{meeting.transcriptRaw}</p>
                         </div>
                       </ScrollArea>
@@ -1111,12 +999,9 @@ export default function MeetingDetailPage({ params }) {
                 </Card>
               </TabsContent>
 
-              {/* ATTENDEES TAB */}
               <TabsContent value="attendees">
                 <Card className="bg-card border-muted">
-                  <CardHeader>
-                    <CardTitle>Attendees</CardTitle>
-                  </CardHeader>
+                  <CardHeader><CardTitle>Attendees</CardTitle></CardHeader>
                   <CardContent>
                     <div className="space-y-4">
                       {meeting.attendees?.map((attendee) => (
@@ -1131,7 +1016,6 @@ export default function MeetingDetailPage({ params }) {
                 </Card>
               </TabsContent>
 
-              {/* ACTION ITEMS TAB */}
               <TabsContent value="action-items">
                 <Card className="bg-card border-muted">
                   <CardHeader>
@@ -1146,33 +1030,19 @@ export default function MeetingDetailPage({ params }) {
                         {meeting.actionItems.map((item, i) => (
                           <div key={i} className="flex items-start gap-3 p-3 bg-muted/50 rounded-lg">
                             <div className="mt-1">
-                              <div className={`w-5 h-5 rounded border-2 flex items-center justify-center ${
-                                item.status === 'completed'
-                                  ? 'bg-green-500 border-green-500'
-                                  : 'border-slate-600'
-                              }`}>
+                              <div className={`w-5 h-5 rounded border-2 flex items-center justify-center ${item.status === 'completed' ? 'bg-green-500 border-green-500' : 'border-slate-600'}`}>
                                 {item.status === 'completed' && <CheckSquare className="h-3 w-3 text-white" />}
                               </div>
                             </div>
                             <div className="flex-1">
-                              <p className={item.status === 'completed' ? 'line-through text-slate-500' : ''}>
-                                {item.task}
-                              </p>
-                              {item.owner && (
-                                <p className="text-sm text-muted-foreground">
-                                  Assigned to: {item.owner.firstName} {item.owner.lastName}
-                                </p>
-                              )}
-                              {item.deadline && (
-                                <p className="text-sm text-muted-foreground">
-                                  Due: {format(new Date(item.deadline), 'MMM d, yyyy')}
-                                </p>
-                              )}
+                              <p className={item.status === 'completed' ? 'line-through text-slate-500' : ''}>{item.task}</p>
+                              {item.owner && <p className="text-sm text-muted-foreground">Assigned to: {item.owner.firstName} {item.owner.lastName}</p>}
+                              {item.deadline && <p className="text-sm text-muted-foreground">Due: {format(new Date(item.deadline), 'MMM d, yyyy')}</p>}
                             </div>
                             <Badge className={
-                              item.status === 'completed'   ? 'bg-green-500/20 text-green-400' :
-                              item.status === 'in_progress' ? 'bg-blue-500/20 text-blue-400' :
-                              'bg-yellow-500/20 text-yellow-400'
+                              item.status === 'completed' ? 'bg-green-500/20 text-green-400' :
+                                item.status === 'in_progress' ? 'bg-blue-500/20 text-blue-400' :
+                                  'bg-yellow-500/20 text-yellow-400'
                             }>
                               {item.status}
                             </Badge>
@@ -1188,7 +1058,6 @@ export default function MeetingDetailPage({ params }) {
             </Tabs>
           </div>
 
-          {/* Sidebar */}
           <div className="space-y-6">
             <MeetingQAPanel meetingId={meeting._id} meetingName={meeting.name} />
             <SimilarMeetingsPanel meetingId={meeting._id} />

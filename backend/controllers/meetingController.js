@@ -203,6 +203,7 @@ exports.getMeeting = async (req, res) => {
       .populate('host', 'firstName lastName email role avatar')
       .populate('attendees.user', 'firstName lastName email avatar role')
       .populate('actionItems.owner', 'firstName lastName email')
+      .populate('attendeeContributions.user', 'firstName lastName email avatar') // ✅ FIX: was missing
       .populate('parentMeetingId', 'name scheduledDate');
 
     if (!meeting) {
@@ -218,7 +219,6 @@ exports.getMeeting = async (req, res) => {
       return attendeeId === req.user.userId;
     });
 
-    // Allow superiors of host to view meeting
     const { getOrgTreeUsers } = require('../middleware');
     let isSuperiorOfHost = false;
     if (!isAttendee && !req.user.isAdmin && hostId !== req.user.userId) {
@@ -620,9 +620,9 @@ exports.manualUpload = async (req, res) => {
 
     const attendeeUsers = parsedAttendees.length > 0
       ? await User.find({
-          _id: { $in: parsedAttendees.map(a => a.user || a) },
-          isActive: true
-        })
+        _id: { $in: parsedAttendees.map(a => a.user || a) },
+        isActive: true
+      })
       : [];
 
     const formattedAttendees = attendeeUsers.map(user => ({ user: user._id }));
@@ -809,34 +809,34 @@ exports.getSimilarMeetings = async (req, res) => {
 
     const similar = await findSimilarMeetings(id, 3);
 
-// Enrich with real meeting data from MongoDB
-const enriched = await Promise.all(
-  similar.map(async (s) => {
-    try {
-      const mtg = await Meeting.findById(s.meetingId)
-        .select('name domain scheduledDate attendees status');
-      if (mtg) {
-        return {
-          ...s,
-          _id: mtg._id,
-          name: mtg.name,
-          domain: mtg.domain,
-          scheduledDate: mtg.scheduledDate,
-          attendeeCount: mtg.attendees?.length || 0,
-          status: mtg.status
-        };
-      }
-      return s;
-    } catch (e) {
-      return s;
-    }
-  })
-);
+    // Enrich with real meeting data from MongoDB
+    const enriched = await Promise.all(
+      similar.map(async (s) => {
+        try {
+          const mtg = await Meeting.findById(s.meetingId)
+            .select('name domain scheduledDate attendees status');
+          if (mtg) {
+            return {
+              ...s,
+              _id: mtg._id,
+              name: mtg.name,
+              domain: mtg.domain,
+              scheduledDate: mtg.scheduledDate,
+              attendeeCount: mtg.attendees?.length || 0,
+              status: mtg.status
+            };
+          }
+          return s;
+        } catch (e) {
+          return s;
+        }
+      })
+    );
 
-res.json({
-  success: true,
-  similarMeetings: enriched
-});
+    res.json({
+      success: true,
+      similarMeetings: enriched
+    });
   } catch (error) {
     logger.error(`Get similar meetings error: ${error.message}`);
     res.status(500).json({
@@ -1037,7 +1037,8 @@ exports.exportToPDF = async (req, res) => {
 
     const meeting = await Meeting.findById(id)
       .populate('host', 'firstName lastName')
-      .populate('attendees.user', 'firstName lastName');
+      .populate('attendees.user', 'firstName lastName')
+      .populate('attendeeContributions.user', 'firstName lastName email avatar'); // ✅ add this
 
     if (!meeting) {
       return res.status(404).json({
