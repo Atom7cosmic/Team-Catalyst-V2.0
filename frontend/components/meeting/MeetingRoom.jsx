@@ -526,10 +526,31 @@ export default function MeetingRoom({ meetingId, user }) {
   const startRecording = () => {
     if (!localStreamRef.current) return;
     try {
-      const audioStream = new MediaStream(localStreamRef.current.getAudioTracks());
+      // FIX: Mix ALL audio — local mic + all remote participants
+      // Previously only recorded local mic so remote voices never appeared in transcript
+      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      const destination = audioContext.createMediaStreamDestination();
+
+      // Add local mic audio
+      const localSource = audioContext.createMediaStreamSource(localStreamRef.current);
+      localSource.connect(destination);
+
+      // Add all remote participants audio streams
+      Object.entries(remoteStreams).forEach(([uid, remoteStream]) => {
+        if (remoteStream && remoteStream.getAudioTracks().length > 0) {
+          try {
+            const remoteSource = audioContext.createMediaStreamSource(remoteStream);
+            remoteSource.connect(destination);
+          } catch (e) {
+            console.warn('Could not add remote audio for ' + uid + ':', e.message);
+          }
+        }
+      });
+
+      const mixedStream = destination.stream;
       const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
         ? 'audio/webm;codecs=opus' : 'audio/webm';
-      const recorder = new MediaRecorder(audioStream, { mimeType });
+      const recorder = new MediaRecorder(mixedStream, { mimeType });
       recordingChunksRef.current = [];
 
       recorder.ondataavailable = e => {

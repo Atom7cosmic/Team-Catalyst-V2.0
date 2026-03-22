@@ -353,7 +353,7 @@ async function processMeeting(job) {
     // Use only attendees who actually joined for speaker count
     // Passing num_speakers=4 when only 3 spoke causes pyannote to hallucinate a 4th speaker
     const joinedAttendees = meeting.attendees.filter(
-      a => a.status === 'joined' || a.status === 'present' || a.status === 'left'
+      a => a.attended === true || a.joinedAt !== null
     );
     const activeAttendees = joinedAttendees.length > 0 ? joinedAttendees : meeting.attendees;
     const attendeeNames = activeAttendees
