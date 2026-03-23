@@ -50,6 +50,9 @@ export default function MeetingRoom({ meetingId, user }) {
   const [isNativeFullscreen, setIsNativeFullscreen] = useState(false);
   const [isMyRecording, setIsMyRecording] = useState(false);
 
+  // Detect mobile — screen share not supported on mobile browsers
+  const isMobile = typeof navigator !== 'undefined' && /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+
   const myId = (user?._id || user?.id)?.toString();
   const myName = user?.firstName ? `${user.firstName} ${user.lastName}` : 'You';
 
@@ -668,9 +671,11 @@ export default function MeetingRoom({ meetingId, user }) {
         <CtrlBtn onClick={toggleVideo} label={isVideoEnabled ? 'Stop Video' : 'Start Video'} danger={!isVideoEnabled}>
           {isVideoEnabled ? <Video className="h-5 w-5" /> : <VideoOff className="h-5 w-5" />}
         </CtrlBtn>
-        <CtrlBtn onClick={toggleScreenShare} label={isScreenSharing ? 'Stop Share' : 'Share'} highlight={isScreenSharing}>
-          {isScreenSharing ? <StopCircle className="h-5 w-5" /> : <ScreenShare className="h-5 w-5" />}
-        </CtrlBtn>
+        {!isMobile && (
+          <CtrlBtn onClick={toggleScreenShare} label={isScreenSharing ? 'Stop Share' : 'Share'} highlight={isScreenSharing}>
+            {isScreenSharing ? <StopCircle className="h-5 w-5" /> : <ScreenShare className="h-5 w-5" />}
+          </CtrlBtn>
+        )}
         <CtrlBtn onClick={toggleHand} label={isHandRaised ? 'Lower Hand' : 'Raise Hand'} warn={isHandRaised}>
           <Hand className="h-5 w-5" />
         </CtrlBtn>
@@ -821,11 +826,21 @@ export default function MeetingRoom({ meetingId, user }) {
             </div>
           ) : (
             <div className={cn(
-              'grid gap-3 h-full',
-              totalParticipants === 1 ? 'grid-cols-1' :
-              totalParticipants === 2 ? 'grid-cols-2' :
-              totalParticipants <= 4 ? 'grid-cols-2' :
-              totalParticipants <= 6 ? 'grid-cols-3' : 'grid-cols-4'
+              'grid gap-2 h-full',
+              // Dynamic Google Meet-style layout
+              // 1 person  → full screen, centered
+              // 2 people  → side by side, full height
+              // 3 people  → top row has 1 large, bottom has 2
+              // 4 people  → 2x2 grid
+              // 5-6       → 2 rows, top 2-3, bottom 3-2
+              // 7-9       → 3x3 grid
+              // 10+       → 4 columns
+              totalParticipants === 1 ? 'grid-cols-1 grid-rows-1' :
+              totalParticipants === 2 ? 'grid-cols-2 grid-rows-1' :
+              totalParticipants === 3 ? 'grid-cols-2 grid-rows-2' :
+              totalParticipants === 4 ? 'grid-cols-2 grid-rows-2' :
+              totalParticipants <= 6 ? 'grid-cols-3 grid-rows-2' :
+              totalParticipants <= 9 ? 'grid-cols-3 grid-rows-3' : 'grid-cols-4'
             )}>
               <LocalTile
                 videoRef={setLocalVideoRef} name={myName} isHost={isHost}
@@ -833,13 +848,15 @@ export default function MeetingRoom({ meetingId, user }) {
                 isScreenSharing={isScreenSharing} isHandRaised={raisedHands.has(myId)}
                 isPinned={pinnedUserId === 'local'} onPin={() => setPinnedUserId('local')}
                 onFullscreen={() => handleFullscreen('local')}
+                spanFull={totalParticipants === 3}
               />
-              {remoteEntries.map(([uid, stream]) => (
+              {remoteEntries.map(([uid, stream], idx) => (
                 <RemoteTile key={uid} userId={uid} stream={stream}
                   name={getParticipantName(uid)} isHandRaised={raisedHands.has(uid)}
                   isPinned={pinnedUserId === uid}
                   onPin={() => setPinnedUserId(p => p === uid ? null : uid)}
                   onFullscreen={() => handleFullscreen(uid)}
+                  spanFull={totalParticipants === 3 && idx === 0}
                 />
               ))}
             </div>
@@ -901,11 +918,12 @@ export default function MeetingRoom({ meetingId, user }) {
 }
 
 function LocalTile({ videoRef, name, isHost, isAudioEnabled, isVideoEnabled,
-  isScreenSharing, isHandRaised, isPinned, onPin, onFullscreen, large, thumbnail, isFullscreen }) {
+  isScreenSharing, isHandRaised, isPinned, onPin, onFullscreen, large, thumbnail, isFullscreen, spanFull }) {
   return (
     <div className={cn(
       'relative bg-slate-800 rounded-xl overflow-hidden group',
-      large ? 'w-full h-full' : thumbnail ? 'w-40 h-28 shrink-0' : 'w-full h-full'
+      large ? 'w-full h-full' : thumbnail ? 'w-40 h-28 shrink-0' : 'w-full h-full',
+      spanFull && 'col-span-2'
     )}>
       <video ref={videoRef} autoPlay muted playsInline className="w-full h-full object-cover" />
       <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity flex items-start justify-end p-2 gap-1">
@@ -928,10 +946,10 @@ function LocalTile({ videoRef, name, isHost, isAudioEnabled, isVideoEnabled,
 }
 
 function RemoteTile({ userId, stream, name, isHandRaised, isPinned,
-  onPin, onFullscreen, large, thumbnail, isFullscreen }) {
+  onPin, onFullscreen, large, thumbnail, isFullscreen, spanFull }) {
   const videoRef = useRef(null);
   const [hasVideo, setHasVideo] = useState(false);
-  const initials = name.split(' ').map(n => n[0]).join('').slice(0, 2).toUpperCase();
+  const initials = name.split(' ').map(n => n[0] || '').join('').slice(0, 2).toUpperCase() || '??';
 
   useEffect(() => {
     if (videoRef.current && stream) {
@@ -948,7 +966,8 @@ function RemoteTile({ userId, stream, name, isHandRaised, isPinned,
   return (
     <div className={cn(
       'relative bg-slate-800 rounded-xl overflow-hidden group',
-      large ? 'w-full h-full' : thumbnail ? 'w-40 h-28 shrink-0' : 'w-full h-full'
+      large ? 'w-full h-full' : thumbnail ? 'w-40 h-28 shrink-0' : 'w-full h-full',
+      spanFull && 'col-span-2'
     )}>
       <video ref={videoRef} autoPlay playsInline
         className={cn('w-full h-full object-cover', !hasVideo && 'hidden')} />

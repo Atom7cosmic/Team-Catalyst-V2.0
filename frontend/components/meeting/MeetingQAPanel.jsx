@@ -9,6 +9,7 @@ import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { cn } from '@/lib/utils';
 import api from '@/lib/axios';
+import ReactMarkdown from 'react-markdown';
 import toast from 'react-hot-toast';
 
 export default function MeetingQAPanel({ meetingId, meetingName }) {
@@ -113,7 +114,15 @@ export default function MeetingQAPanel({ meetingId, meetingName }) {
                         : 'bg-muted text-foreground'
                     )}
                   >
-                    <p className="whitespace-pre-wrap">{message.content}</p>
+                    {message.type === 'assistant' ? (
+                      <ReactMarkdown
+                        className="prose prose-invert prose-sm max-w-none prose-p:my-1 prose-strong:text-white prose-ul:my-1 prose-li:my-0"
+                      >
+                        {message.content}
+                      </ReactMarkdown>
+                    ) : (
+                      <p className="whitespace-pre-wrap">{message.content}</p>
+                    )}
 
                     {message.sources?.length > 0 && (
                       <div className="mt-3 pt-3 border-t border-slate-700/50">
