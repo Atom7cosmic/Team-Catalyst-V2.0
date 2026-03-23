@@ -664,7 +664,18 @@ export default function MeetingRoom({ meetingId, user }) {
     if (!isHost) return;
     setIsEndingMeeting(true);
     try {
-      stopMyRecording();
+      // Auto-stop recording and wait for upload before ending meeting
+      if (isRecording && mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+        toast.loading('Saving recording before ending...', { id: 'end-meeting' });
+        mediaRecorderRef.current.stop();
+        socketRef.current?.emit('stop-recording', { meetingId });
+        setIsRecording(false);
+        // Wait for the upload to complete (onstop fires asynchronously)
+        await new Promise(resolve => setTimeout(resolve, 8000));
+        toast.dismiss('end-meeting');
+      } else {
+        stopMyRecording();
+      }
       await api.post(`/meetings/${meetingId}/end`);
       toast.success('Meeting ended');
       cleanup();
