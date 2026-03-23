@@ -80,7 +80,12 @@ function cosineSimilarity(embeddingA, embeddingB) {
     normB += embeddingB[i] * embeddingB[i];
   }
 
-  return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
+  // ✅ FIX: Guard against division by zero when either vector is all zeros
+  // Previously returned NaN silently, now returns 0 (no similarity)
+  const denominator = Math.sqrt(normA) * Math.sqrt(normB);
+  if (denominator === 0) return 0;
+
+  return dotProduct / denominator;
 }
 
 module.exports = {

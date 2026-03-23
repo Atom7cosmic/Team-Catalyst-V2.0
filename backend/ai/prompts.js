@@ -102,14 +102,15 @@ async function findSimilarMeetings(meetingId, limit = 3) {
     const representativeText = meetingChunks.documents.slice(0, 3).join(' ');
     const queryEmbedding = await generateEmbedding(representativeText);
 
-    // Query for similar chunks from other meetings
+    // ✅ FIX: Use direct $ne filter instead of wrapping in $and with a single condition
+    // Previously: { $and: [{ meetingId: { $ne: meetingId } }] }
+    // ChromaDB requires $and to have at least 2 conditions — a single-item $and
+    // causes the filter to silently fail and return ALL meetings including the current one
     const results = await collection.query({
       queryEmbeddings: [queryEmbedding],
       nResults: limit * 3,
       where: {
-        $and: [
-          { meetingId: { $ne: meetingId } }
-        ]
+        meetingId: { $ne: meetingId }
       }
     });
 
@@ -187,13 +188,12 @@ async function findSimilarEmployees(userId, currentState) {
 
     const collection = await chromaClient.getCollection({ name: 'employee_performance' });
 
+    // ✅ FIX: Same fix as findSimilarMeetings — use direct $ne instead of $and wrapper
     const results = await collection.query({
       queryEmbeddings: [embedding],
       nResults: 5,
       where: {
-        $and: [
-          { userId: { $ne: userId } }
-        ]
+        userId: { $ne: userId }
       }
     });
 
