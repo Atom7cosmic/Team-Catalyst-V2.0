@@ -213,9 +213,10 @@ exports.getMeeting = async (req, res) => {
     }
 
     // Check if user has access
+    // Check access
     const hasAccess =
-      meeting.host._id.toString() === req.user.userId ||
-      meeting.attendees.some(a => a.user._id.toString() === req.user.userId) ||
+      meeting.host?.toString() === req.user.userId ||
+      meeting.attendees?.some(a => a.user?.toString() === req.user.userId) ||
       req.user.isAdmin;
 
     if (!hasAccess) {
@@ -668,7 +669,7 @@ exports.getProcessingStatus = async (req, res) => {
     const { id } = req.params;
 
     const meeting = await Meeting.findById(id)
-      .select('status processingSteps processingError');
+      .select('status processingSteps processingError host attendees');
 
     if (!meeting) {
       return res.status(404).json({
@@ -680,6 +681,7 @@ exports.getProcessingStatus = async (req, res) => {
     // Check access
     const hasAccess =
       meeting.host?.toString() === req.user.userId ||
+      meeting.attendees?.some(a => a.user?.toString() === req.user.userId) ||
       req.user.isAdmin;
 
     if (!hasAccess) {
