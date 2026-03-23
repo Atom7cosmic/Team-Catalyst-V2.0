@@ -562,14 +562,46 @@ export default function MeetingRoom({ meetingId, user }) {
 
       recorder.onstop = async () => {
         const blob = new Blob(recordingChunksRef.current, { type: 'audio/webm' });
-        const fd = new FormData();
-        fd.append('recording', blob, 'meeting-recording.webm');
         try {
+          toast.loading('Processing per-device audio...', { id: 'upload' });
+
+          // Step 1: Stop my own per-device recording and flush final chunks
+          stopMyRecording();
+
+          // Step 2: Ask server to upload all participants' device audio to S3
+          // Server merges chunks per user and returns S3 keys
+          const perDeviceAudio = await new Promise((resolve) => {
+            const timeout = setTimeout(() => {
+              // If no response in 15s, proceed without per-device audio
+              resolve([]);
+            }, 15000);
+
+            socketRef.current?.once('transcript-queue', ({ perDeviceAudio: pda }) => {
+              clearTimeout(timeout);
+              resolve(pda || []);
+            });
+
+            socketRef.current?.emit('get-transcript-queue', { meetingId });
+          });
+
+          logger.info?.(`Per-device audio collected: ${perDeviceAudio.length} participants`);
+
+          // Step 3: Upload mixed audio + per-device audio keys together
+          const fd = new FormData();
+          fd.append('recording', blob, 'meeting-recording.webm');
+          if (perDeviceAudio.length > 0) {
+            fd.append('perDeviceAudio', JSON.stringify(perDeviceAudio));
+          }
+
           toast.loading('Uploading recording for AI processing...', { id: 'upload' });
           await api.post(`/meetings/${meetingId}/upload-recording`, fd, {
             headers: { 'Content-Type': 'multipart/form-data' }
           });
-          toast.success('Recording uploaded! AI summary will be ready shortly.', { id: 'upload' });
+
+          const method = perDeviceAudio.length > 0
+            ? `Per-device audio from ${perDeviceAudio.length} participants — accurate speaker attribution!`
+            : 'Mixed audio uploaded — AI will identify speakers.';
+          toast.success(method, { id: 'upload', duration: 5000 });
         } catch (e) {
           toast.error('Failed to upload recording', { id: 'upload' });
         }
@@ -589,7 +621,7 @@ export default function MeetingRoom({ meetingId, user }) {
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       mediaRecorderRef.current.stop();
     }
-    mediaRecorderRef.current = null;
+    // Note: actual upload happens in mediaRecorder.onstop after chunks are ready
     socketRef.current?.emit('stop-recording', { meetingId });
     setIsRecording(false);
     toast.success('Recording stopped — uploading...');

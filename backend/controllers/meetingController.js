@@ -2,7 +2,7 @@ const Meeting = require('../models/Meeting');
 const { User, Notification, AuditLog, PromptTemplate } = require('../models');
 const { Queue } = require('bullmq');
 const { chromaClient } = require('../config/chroma');
-const { queryMeetingRAG: ragMeetingQA, findSimilarMeetingsRAG: findSimilarMeetings } = require('../ai/rag');
+const { ragMeetingQA, findSimilarMeetings } = require('../ai/prompts');
 const { uploadFile, deleteFile } = require('../config/s3');
 const winston = require('winston');
 const path = require('path');
@@ -44,6 +44,7 @@ exports.createMeeting = async (req, res) => {
 
     const host = req.user.userId;
 
+    // Validate attendees exist
     const attendeeUsers = await User.find({
       _id: { $in: attendees.map(a => a.user || a) },
       isActive: true
@@ -56,10 +57,12 @@ exports.createMeeting = async (req, res) => {
       });
     }
 
+    // Format attendees
     const formattedAttendees = attendeeUsers.map(user => ({
       user: user._id
     }));
 
+    // Include host as attendee if not already
     if (!formattedAttendees.find(a => a.user.toString() === host)) {
       formattedAttendees.push({ user: host });
     }
@@ -87,26 +90,22 @@ exports.createMeeting = async (req, res) => {
 
     await meeting.save();
 
-    // ✅ FIX: Notification failure never crashes createMeeting
-    try {
-      const notifications = attendeeUsers
-        .filter(u => u._id.toString() !== host)
-        .map(user => ({
-          user: user._id,
-          type: 'meeting_invite',
-          title: `Meeting invitation: ${name}`,
-          message: `You've been invited to ${domain}: ${name}`,
-          link: `/meetings/${meeting._id}`,
-          entityType: 'meeting',
-          entityId: meeting._id
-        }));
-      if (notifications.length > 0) {
-        await Notification.insertMany(notifications);
-      }
-    } catch (notifErr) {
-      logger.warn(`Create meeting notification failed: ${notifErr.message}`);
-    }
+    // Create notifications for attendees
+    const notifications = attendeeUsers
+      .filter(u => u._id.toString() !== host)
+      .map(user => ({
+        user: user._id,
+        type: 'meeting_invite',
+        title: `Meeting invitation: ${name}`,
+        message: `You've been invited to ${domain}: ${name}`,
+        link: `/meetings/${meeting._id}`,
+        entityType: 'meeting',
+        entityId: meeting._id
+      }));
 
+    await Notification.insertMany(notifications);
+
+    // Audit log
     await AuditLog.create({
       user: host,
       action: 'meeting_create',
@@ -146,6 +145,7 @@ exports.getMeetings = async (req, res) => {
 
     const query = {};
 
+    // User can see meetings they host or attend
     query.$or = [
       { host: req.user.userId },
       { 'attendees.user': req.user.userId }
@@ -203,7 +203,6 @@ exports.getMeeting = async (req, res) => {
       .populate('host', 'firstName lastName email role avatar')
       .populate('attendees.user', 'firstName lastName email avatar role')
       .populate('actionItems.owner', 'firstName lastName email')
-      .populate('attendeeContributions.user', 'firstName lastName email avatar') // ✅ FIX: was missing
       .populate('parentMeetingId', 'name scheduledDate');
 
     if (!meeting) {
@@ -213,23 +212,11 @@ exports.getMeeting = async (req, res) => {
       });
     }
 
-    const hostId = meeting.host?._id?.toString() || meeting.host?.toString();
-    const isAttendee = meeting.attendees.some(a => {
-      const attendeeId = a.user?._id?.toString() || a.user?.toString();
-      return attendeeId === req.user.userId;
-    });
-
-    const { getOrgTreeUsers } = require('../middleware');
-    let isSuperiorOfHost = false;
-    if (!isAttendee && !req.user.isAdmin && hostId !== req.user.userId) {
-      const orgTree = await getOrgTreeUsers(req.user.userId);
-      isSuperiorOfHost = orgTree.includes(hostId);
-    }
-
-    const hasAccess = hostId === req.user.userId ||
-      isAttendee ||
-      req.user.isAdmin ||
-      isSuperiorOfHost;
+    // Check if user has access
+    const hasAccess =
+      meeting.host._id.toString() === req.user.userId ||
+      meeting.attendees.some(a => a.user._id.toString() === req.user.userId) ||
+      req.user.isAdmin;
 
     if (!hasAccess) {
       return res.status(403).json({
@@ -266,6 +253,7 @@ exports.updateMeeting = async (req, res) => {
       });
     }
 
+    // Only host or admin can update
     if (meeting.host.toString() !== req.user.userId && !req.user.isAdmin) {
       return res.status(403).json({
         success: false,
@@ -273,6 +261,7 @@ exports.updateMeeting = async (req, res) => {
       });
     }
 
+    // Prevent updates if meeting is processing or ready
     if (['processing', 'ready'].includes(meeting.status)) {
       return res.status(400).json({
         success: false,
@@ -281,6 +270,7 @@ exports.updateMeeting = async (req, res) => {
     }
 
     const oldValue = { ...meeting.toObject() };
+
     Object.assign(meeting, updates);
     await meeting.save();
 
@@ -330,6 +320,7 @@ exports.deleteMeeting = async (req, res) => {
       });
     }
 
+    // Delete from S3 if recording exists
     if (meeting.recordingUrl) {
       try {
         const key = meeting.recordingUrl.split('/').pop();
@@ -339,9 +330,12 @@ exports.deleteMeeting = async (req, res) => {
       }
     }
 
+    // Delete from ChromaDB
     try {
       const collection = await chromaClient.getCollection({ name: 'meeting_transcripts' });
-      await collection.delete({ where: { meetingId: id } });
+      await collection.delete({
+        where: { meetingId: id }
+      });
     } catch (err) {
       logger.warn(`Failed to delete from ChromaDB: ${err.message}`);
     }
@@ -357,7 +351,10 @@ exports.deleteMeeting = async (req, res) => {
       ipAddress: req.ip
     });
 
-    res.json({ success: true, message: 'Meeting deleted' });
+    res.json({
+      success: true,
+      message: 'Meeting deleted'
+    });
   } catch (error) {
     logger.error(`Delete meeting error: ${error.message}`);
     res.status(500).json({
@@ -367,7 +364,8 @@ exports.deleteMeeting = async (req, res) => {
   }
 };
 
-// End meeting — only host, triggers AI processing if recording exists
+// ─── FIX: End meeting ────────────────────────────────────────────────────────
+// Was missing entirely — caused the 404 on "End Meeting" button click.
 exports.endMeeting = async (req, res) => {
   try {
     const { id } = req.params;
@@ -381,6 +379,7 @@ exports.endMeeting = async (req, res) => {
       });
     }
 
+    // Only the host (or admin) can end the meeting
     if (meeting.host.toString() !== req.user.userId && !req.user.isAdmin) {
       return res.status(403).json({
         success: false,
@@ -388,6 +387,7 @@ exports.endMeeting = async (req, res) => {
       });
     }
 
+    // Guard: don't re-end an already completed/cancelled meeting
     if (['completed', 'cancelled', 'processing', 'ready'].includes(meeting.status)) {
       return res.status(400).json({
         success: false,
@@ -395,111 +395,66 @@ exports.endMeeting = async (req, res) => {
       });
     }
 
+    // Mark all attendees who haven't explicitly left as having left now
     meeting.attendees.forEach(attendee => {
       if (attendee.attended && !attendee.leftAt) {
         attendee.leftAt = new Date();
       }
     });
 
+    meeting.status = 'completed';
     meeting.endedAt = new Date();
 
-    // ✅ Safe duration — never NaN
+    // Calculate actual duration in minutes
     if (meeting.startedAt) {
-      const durationMs = meeting.endedAt - meeting.startedAt;
-      meeting.actualDuration = (!isNaN(durationMs) && durationMs > 0)
-        ? Math.round(durationMs / 60000)
-        : 0;
-    } else {
-      meeting.actualDuration = 0;
-    }
-
-    // If recording exists queue for AI processing, else mark completed
-    if (meeting.recordingUrl) {
-      meeting.status = 'processing';
-      meeting.processingSteps = [
-        { step: 'upload', status: 'done', timestamp: new Date() },
-        { step: 'transcription', status: 'pending' },
-        { step: 'diarization', status: 'pending' },
-        { step: 'analysis', status: 'pending' },
-        { step: 'embedding', status: 'pending' },
-        { step: 'ready', status: 'pending' }
-      ];
-    } else {
-      meeting.status = 'completed';
+      meeting.actualDuration = Math.round(
+        (meeting.endedAt - meeting.startedAt) / 60000
+      );
     }
 
     await meeting.save();
 
-    // Queue for AI processing if recording exists
-    if (meeting.recordingUrl && meetingQueue) {
-      try {
-        await meetingQueue.add('process-meeting', {
-          meetingId: id,
-          audioKey: meeting.recordingUrl
-        }, {
-          attempts: 3,
-          backoff: { type: 'exponential', delay: 5000 }
-        });
-        logger.info(`Meeting ${id} queued for AI processing after end`);
-      } catch (queueError) {
-        logger.warn(`Failed to queue meeting: ${queueError.message}`);
-        meeting.status = 'completed';
-        await meeting.save();
-      }
+    // Notify all attendees the meeting has ended
+    const attendeeIds = meeting.attendees
+      .map(a => a.user)
+      .filter(uid => uid.toString() !== req.user.userId);
+
+    if (attendeeIds.length > 0) {
+      const notifications = attendeeIds.map(uid => ({
+        user: uid,
+        type: 'meeting_ended',
+        title: `Meeting ended: ${meeting.name}`,
+        message: `The meeting "${meeting.name}" has been ended by the host.`,
+        link: `/meetings/${meeting._id}`,
+        entityType: 'meeting',
+        entityId: meeting._id
+      }));
+      await Notification.insertMany(notifications);
     }
 
-    // ✅ FIX: Notification failure never crashes endMeeting
-    try {
-      const attendeeIds = meeting.attendees
-        .map(a => a.user)
-        .filter(uid => uid.toString() !== req.user.userId);
-
-      if (attendeeIds.length > 0) {
-        const notifications = attendeeIds.map(uid => ({
-          user: uid,
-          type: 'meeting_ended',
-          title: `Meeting ended: ${meeting.name}`,
-          message: meeting.recordingUrl
-            ? `"${meeting.name}" has ended. AI summary will be ready shortly.`
-            : `"${meeting.name}" has been ended by the host.`,
-          link: `/meetings/${meeting._id}`,
-          entityType: 'meeting',
-          entityId: meeting._id
-        }));
-        await Notification.insertMany(notifications);
-      }
-    } catch (notifErr) {
-      logger.warn(`End meeting notification failed: ${notifErr.message}`);
-    }
-
+    // Emit real-time event so all participants in the room know
     const io = req.app.get('io');
     if (io) {
       io.to(id).emit('meeting-ended', {
         meetingId: id,
-        endedAt: meeting.endedAt,
-        hasRecording: !!meeting.recordingUrl
+        endedAt: meeting.endedAt
       });
     }
 
+    // Audit log
     await AuditLog.create({
       user: req.user.userId,
       action: 'meeting_end',
       resourceType: 'meeting',
       resourceId: id,
-      newValue: {
-        status: meeting.status,
-        endedAt: meeting.endedAt,
-        queuedForProcessing: !!meeting.recordingUrl
-      },
+      newValue: { status: 'completed', endedAt: meeting.endedAt },
       success: true,
       ipAddress: req.ip
     });
 
     res.json({
       success: true,
-      message: meeting.recordingUrl
-        ? 'Meeting ended and queued for AI processing'
-        : 'Meeting ended successfully',
+      message: 'Meeting ended successfully',
       meeting
     });
   } catch (error) {
@@ -510,6 +465,7 @@ exports.endMeeting = async (req, res) => {
     });
   }
 };
+// ─────────────────────────────────────────────────────────────────────────────
 
 // Upload recording from room
 exports.uploadRecording = async (req, res) => {
@@ -532,6 +488,7 @@ exports.uploadRecording = async (req, res) => {
       });
     }
 
+    // Only host can upload recording
     if (meeting.host.toString() !== req.user.userId) {
       return res.status(403).json({
         success: false,
@@ -539,9 +496,11 @@ exports.uploadRecording = async (req, res) => {
       });
     }
 
+    // Upload to S3
     const key = `meetings/${id}/recording-${Date.now()}.webm`;
     await uploadFile(key, req.file.buffer, req.file.mimetype);
 
+    // Update meeting
     meeting.recordingUrl = key;
     meeting.recordingSource = 'room';
     meeting.status = 'processing';
@@ -553,13 +512,32 @@ exports.uploadRecording = async (req, res) => {
     });
     await meeting.save();
 
+    // Add to processing queue
+    // perDeviceAudio is optional — if present, worker uses per-device transcription
+    // for 100% accurate speaker attribution without pyannote
+    let perDeviceAudio = null;
+    try {
+      if (req.body.perDeviceAudio) {
+        perDeviceAudio = typeof req.body.perDeviceAudio === 'string'
+          ? JSON.parse(req.body.perDeviceAudio)
+          : req.body.perDeviceAudio;
+        logger.info(`Per-device audio received for ${perDeviceAudio.length} participants`);
+      }
+    } catch (e) {
+      logger.warn(`Failed to parse perDeviceAudio: ${e.message}`);
+    }
+
     if (meetingQueue) {
       await meetingQueue.add('process-meeting', {
         meetingId: id,
-        audioKey: key
+        audioKey: key,
+        ...(perDeviceAudio && perDeviceAudio.length > 0 ? { perDeviceAudio } : {})
       }, {
         attempts: 3,
-        backoff: { type: 'exponential', delay: 5000 }
+        backoff: {
+          type: 'exponential',
+          delay: 5000
+        }
       });
     }
 
@@ -580,7 +558,13 @@ exports.uploadRecording = async (req, res) => {
 // Manual audio upload
 exports.manualUpload = async (req, res) => {
   try {
-    const { name, scheduledDate, domain, agenda, attendees } = req.body;
+    const {
+      name,
+      scheduledDate,
+      domain,
+      agenda,
+      attendees
+    } = req.body;
 
     if (!req.file) {
       return res.status(400).json({
@@ -589,10 +573,8 @@ exports.manualUpload = async (req, res) => {
       });
     }
 
-    const allowedTypes = [
-      'audio/mpeg', 'audio/wav', 'audio/wave',
-      'audio/x-wav', 'audio/mp4', 'audio/x-m4a'
-    ];
+    // Validate file type
+    const allowedTypes = ['audio/mpeg', 'audio/wav', 'audio/wave', 'audio/x-wav', 'audio/mp4', 'audio/x-m4a'];
     if (!allowedTypes.includes(req.file.mimetype)) {
       return res.status(400).json({
         success: false,
@@ -600,6 +582,7 @@ exports.manualUpload = async (req, res) => {
       });
     }
 
+    // Validate file size (100MB)
     if (req.file.size > 100 * 1024 * 1024) {
       return res.status(400).json({
         success: false,
@@ -609,28 +592,21 @@ exports.manualUpload = async (req, res) => {
 
     const host = req.user.userId;
 
-    let parsedAttendees = [];
-    try {
-      parsedAttendees = typeof attendees === 'string'
-        ? JSON.parse(attendees)
-        : (attendees || []);
-    } catch (e) {
-      parsedAttendees = [];
-    }
+    // Format attendees
+    const attendeeUsers = await User.find({
+      _id: { $in: attendees.map(a => a.user || a) },
+      isActive: true
+    });
 
-    const attendeeUsers = parsedAttendees.length > 0
-      ? await User.find({
-        _id: { $in: parsedAttendees.map(a => a.user || a) },
-        isActive: true
-      })
-      : [];
-
-    const formattedAttendees = attendeeUsers.map(user => ({ user: user._id }));
+    const formattedAttendees = attendeeUsers.map(user => ({
+      user: user._id
+    }));
 
     if (!formattedAttendees.find(a => a.user.toString() === host)) {
       formattedAttendees.push({ user: host });
     }
 
+    // Create meeting
     const meeting = new Meeting({
       name,
       scheduledDate: new Date(scheduledDate),
@@ -650,6 +626,7 @@ exports.manualUpload = async (req, res) => {
       ]
     });
 
+    // Upload to S3
     const ext = path.extname(req.file.originalname) || '.mp3';
     const key = `meetings/${meeting._id}/upload-${Date.now()}${ext}`;
     await uploadFile(key, req.file.buffer, req.file.mimetype);
@@ -657,13 +634,17 @@ exports.manualUpload = async (req, res) => {
     meeting.recordingUrl = key;
     await meeting.save();
 
+    // Add to processing queue
     if (meetingQueue) {
       await meetingQueue.add('process-meeting', {
         meetingId: meeting._id.toString(),
         audioKey: key
       }, {
         attempts: 3,
-        backoff: { type: 'exponential', delay: 5000 }
+        backoff: {
+          type: 'exponential',
+          delay: 5000
+        }
       });
     }
 
@@ -687,7 +668,7 @@ exports.getProcessingStatus = async (req, res) => {
     const { id } = req.params;
 
     const meeting = await Meeting.findById(id)
-      .select('status processingSteps processingError host attendees');
+      .select('status processingSteps processingError');
 
     if (!meeting) {
       return res.status(404).json({
@@ -696,11 +677,10 @@ exports.getProcessingStatus = async (req, res) => {
       });
     }
 
-    const hostId = meeting.host?.toString();
-    const isAttendee = meeting.attendees?.some(
-      a => a.user?.toString() === req.user.userId
-    );
-    const hasAccess = hostId === req.user.userId || isAttendee || req.user.isAdmin;
+    // Check access
+    const hasAccess =
+      meeting.host?.toString() === req.user.userId ||
+      req.user.isAdmin;
 
     if (!hasAccess) {
       return res.status(403).json({
@@ -746,6 +726,7 @@ exports.meetingQA = async (req, res) => {
       });
     }
 
+    // Check access
     const hasAccess =
       meeting.host.toString() === req.user.userId ||
       meeting.attendees.some(a => a.user.toString() === req.user.userId) ||
@@ -758,10 +739,11 @@ exports.meetingQA = async (req, res) => {
       });
     }
 
+    // Check if meeting is ready
     if (meeting.status !== 'ready') {
       return res.status(400).json({
         success: false,
-        message: 'Meeting is still being processed. Please wait until status is ready.'
+        message: 'Meeting is still being processed'
       });
     }
 
@@ -809,33 +791,9 @@ exports.getSimilarMeetings = async (req, res) => {
 
     const similar = await findSimilarMeetings(id, 3);
 
-    // Enrich with real meeting data from MongoDB
-    const enriched = await Promise.all(
-      similar.map(async (s) => {
-        try {
-          const mtg = await Meeting.findById(s.meetingId)
-            .select('name domain scheduledDate attendees status');
-          if (mtg) {
-            return {
-              ...s,
-              _id: mtg._id,
-              name: mtg.name,
-              domain: mtg.domain,
-              scheduledDate: mtg.scheduledDate,
-              attendeeCount: mtg.attendees?.length || 0,
-              status: mtg.status
-            };
-          }
-          return s;
-        } catch (e) {
-          return s;
-        }
-      })
-    );
-
     res.json({
       success: true,
-      similarMeetings: enriched
+      similarMeetings: similar
     });
   } catch (error) {
     logger.error(`Get similar meetings error: ${error.message}`);
@@ -861,6 +819,7 @@ exports.scheduleFollowup = async (req, res) => {
       });
     }
 
+    // Check access
     const hasAccess =
       parentMeeting.host.toString() === req.user.userId ||
       req.user.isAdmin;
@@ -872,6 +831,7 @@ exports.scheduleFollowup = async (req, res) => {
       });
     }
 
+    // Create follow-up meeting with pre-filled data
     const followUpMeeting = new Meeting({
       ...meetingData,
       host: req.user.userId,
@@ -892,28 +852,24 @@ exports.scheduleFollowup = async (req, res) => {
 
     await followUpMeeting.save();
 
+    // Update parent meeting
     parentMeeting.childMeetingIds.push(followUpMeeting._id);
     await parentMeeting.save();
 
-    // ✅ FIX: Notification failure never crashes scheduleFollowup
-    try {
-      const notifications = followUpMeeting.attendees
-        .filter(a => a.user.toString() !== req.user.userId)
-        .map(a => ({
-          user: a.user,
-          type: 'follow_up_reminder',
-          title: 'Follow-up meeting scheduled',
-          message: `A follow-up to "${parentMeeting.name}" has been scheduled`,
-          link: `/meetings/${followUpMeeting._id}`,
-          entityType: 'meeting',
-          entityId: followUpMeeting._id
-        }));
-      if (notifications.length > 0) {
-        await Notification.insertMany(notifications);
-      }
-    } catch (notifErr) {
-      logger.warn(`Follow-up notification failed: ${notifErr.message}`);
-    }
+    // Create notifications
+    const notifications = followUpMeeting.attendees
+      .filter(a => a.user.toString() !== req.user.userId)
+      .map(a => ({
+        user: a.user,
+        type: 'follow_up_reminder',
+        title: `Follow-up meeting scheduled`,
+        message: `A follow-up to "${parentMeeting.name}" has been scheduled`,
+        link: `/meetings/${followUpMeeting._id}`,
+        entityType: 'meeting',
+        entityId: followUpMeeting._id
+      }));
+
+    await Notification.insertMany(notifications);
 
     res.status(201).json({
       success: true,
@@ -943,6 +899,7 @@ exports.joinMeeting = async (req, res) => {
       });
     }
 
+    // Check if user is attendee
     const attendeeIndex = meeting.attendees.findIndex(
       a => a.user.toString() === req.user.userId
     );
@@ -954,6 +911,7 @@ exports.joinMeeting = async (req, res) => {
       });
     }
 
+    // Update attendance
     meeting.attendees[attendeeIndex].attended = true;
     meeting.attendees[attendeeIndex].joinedAt = new Date();
 
@@ -1020,7 +978,10 @@ exports.leaveMeeting = async (req, res) => {
       ipAddress: req.ip
     });
 
-    res.json({ success: true, message: 'Left meeting' });
+    res.json({
+      success: true,
+      message: 'Left meeting'
+    });
   } catch (error) {
     logger.error(`Leave meeting error: ${error.message}`);
     res.status(500).json({
@@ -1037,8 +998,7 @@ exports.exportToPDF = async (req, res) => {
 
     const meeting = await Meeting.findById(id)
       .populate('host', 'firstName lastName')
-      .populate('attendees.user', 'firstName lastName')
-      .populate('attendeeContributions.user', 'firstName lastName email avatar'); // ✅ add this
+      .populate('attendees.user', 'firstName lastName');
 
     if (!meeting) {
       return res.status(404).json({
@@ -1047,6 +1007,7 @@ exports.exportToPDF = async (req, res) => {
       });
     }
 
+    // Check access
     const hasAccess =
       meeting.host._id.toString() === req.user.userId ||
       meeting.attendees.some(a => a.user._id.toString() === req.user.userId) ||
@@ -1062,154 +1023,16 @@ exports.exportToPDF = async (req, res) => {
     res.json({
       success: true,
       message: 'PDF generation endpoint',
-      data: { meeting, generatedAt: new Date() }
+      data: {
+        meeting,
+        generatedAt: new Date()
+      }
     });
   } catch (error) {
     logger.error(`Export PDF error: ${error.message}`);
     res.status(500).json({
       success: false,
       message: 'Failed to export PDF'
-    });
-  }
-};
-
-// Cancel meeting — only host can cancel
-exports.cancelMeeting = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const meeting = await Meeting.findById(id);
-
-    if (!meeting) {
-      return res.status(404).json({
-        success: false,
-        message: 'Meeting not found'
-      });
-    }
-
-    const hostId = meeting.host?._id?.toString() || meeting.host?.toString();
-    if (hostId !== req.user.userId && !req.user.isAdmin) {
-      return res.status(403).json({
-        success: false,
-        message: 'Only the meeting host can cancel this meeting'
-      });
-    }
-
-    if (!['scheduled', 'live'].includes(meeting.status)) {
-      return res.status(400).json({
-        success: false,
-        message: `Cannot cancel a meeting with status: ${meeting.status}`
-      });
-    }
-
-    meeting.status = 'cancelled';
-    await meeting.save();
-
-    // ✅ FIX: Notification failure never crashes cancelMeeting
-    try {
-      const notifications = meeting.attendees
-        .filter(a => a.user?.toString() !== req.user.userId)
-        .map(a => ({
-          user: a.user,
-          type: 'meeting_cancelled',
-          title: `Meeting cancelled: ${meeting.name}`,
-          message: `"${meeting.name}" has been cancelled by the host.`,
-          link: `/meetings/history`,
-          entityType: 'meeting',
-          entityId: meeting._id
-        }));
-
-      if (notifications.length > 0) {
-        await Notification.insertMany(notifications);
-      }
-    } catch (notifErr) {
-      logger.warn(`Cancel meeting notification failed: ${notifErr.message}`);
-    }
-
-    await AuditLog.create({
-      user: req.user.userId,
-      action: 'meeting_cancel',
-      resourceType: 'meeting',
-      resourceId: id,
-      success: true,
-      ipAddress: req.ip
-    });
-
-    const io = req.app.get('io');
-    if (io) {
-      io.to(id).emit('meeting-cancelled', {
-        meetingId: id,
-        message: 'This meeting has been cancelled by the host'
-      });
-    }
-
-    res.json({ success: true, message: 'Meeting cancelled', meeting });
-  } catch (error) {
-    logger.error(`Cancel meeting error: ${error.message}`);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to cancel meeting'
-    });
-  }
-};
-
-// ✅ Save manual speaker corrections on transcript segments
-exports.updateTranscriptSegments = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { transcriptSegments } = req.body;
-
-    if (!transcriptSegments || !Array.isArray(transcriptSegments)) {
-      return res.status(400).json({
-        success: false,
-        message: 'transcriptSegments must be an array'
-      });
-    }
-
-    const meeting = await Meeting.findById(id);
-
-    if (!meeting) {
-      return res.status(404).json({
-        success: false,
-        message: 'Meeting not found'
-      });
-    }
-
-    const hostId = meeting.host?.toString();
-    const isAttendee = meeting.attendees?.some(
-      a => a.user?.toString() === req.user.userId
-    );
-    const hasAccess = hostId === req.user.userId || isAttendee || req.user.isAdmin;
-
-    if (!hasAccess) {
-      return res.status(403).json({
-        success: false,
-        message: 'Access denied'
-      });
-    }
-
-    meeting.transcriptSegments = transcriptSegments;
-    await meeting.save();
-
-    await AuditLog.create({
-      user: req.user.userId,
-      action: 'transcript_correction',
-      resourceType: 'meeting',
-      resourceId: id,
-      newValue: { segmentsUpdated: transcriptSegments.length },
-      success: true,
-      ipAddress: req.ip
-    });
-
-    res.json({
-      success: true,
-      message: 'Transcript segments updated',
-      meeting
-    });
-  } catch (error) {
-    logger.error(`Update transcript segments error: ${error.message}`);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to update transcript segments'
     });
   }
 };

@@ -137,6 +137,9 @@ const transcriptQueue = new Map();
 // Store participant names per room so we can use them for transcript labeling
 const roomParticipants = new Map(); // meetingId → { userId: userName }
 
+// Per-device audio S3 upload helper
+const { uploadFile } = require('./config/s3');
+
 const rooms = new Map();
 
 io.use(async (socket, next) => {
@@ -267,21 +270,52 @@ io.on('connection', (socket) => {
     logger.info(`Audio chunk queued for ${displayName} in meeting ${meetingId}, queue size: ${queue.length}`);
   });
 
-  // ── Host requests merged transcript queue when meeting ends ───────────────
-  socket.on('get-transcript-queue', ({ meetingId }) => {
+  // ── Host requests per-device audio upload when meeting ends ─────────────
+  // Server merges each participant's chunks, uploads to S3, returns S3 keys
+  // Worker then transcribes each person's audio separately — no diarization needed
+  socket.on('get-transcript-queue', async ({ meetingId }) => {
     const queue = transcriptQueue.get(meetingId) || [];
-    // Send back to host — sorted by timestamp
-    const sorted = [...queue].sort((a, b) => a.timestamp - b.timestamp);
+    if (queue.length === 0) {
+      socket.emit('transcript-queue', { meetingId, chunks: [] });
+      return;
+    }
+
+    // Group chunks by userId
+    const byUser = {};
+    for (const chunk of queue) {
+      if (!byUser[chunk.userId]) {
+        byUser[chunk.userId] = { userId: chunk.userId, userName: chunk.userName, buffers: [] };
+      }
+      byUser[chunk.userId].buffers.push(chunk.audioBuffer);
+    }
+
+    logger.info(`Uploading per-device audio for ${Object.keys(byUser).length} participants`);
+
+    const perDeviceAudio = [];
+
+    for (const [userId, data] of Object.entries(byUser)) {
+      try {
+        // Merge all chunks for this user into one buffer
+        const merged = Buffer.concat(data.buffers);
+        const audioKey = `meetings/${meetingId}/device-${userId}-${Date.now()}.webm`;
+        await uploadFile(audioKey, merged, 'audio/webm');
+        perDeviceAudio.push({
+          userId,
+          userName: data.userName,
+          audioKey
+        });
+        logger.info(`Uploaded audio for ${data.userName}: ${audioKey} (${merged.length} bytes)`);
+      } catch (e) {
+        logger.warn(`Failed to upload audio for ${data.userName}: ${e.message}`);
+      }
+    }
+
     socket.emit('transcript-queue', {
       meetingId,
-      chunks: sorted.map(c => ({
-        userId: c.userId,
-        userName: c.userName,
-        timestamp: c.timestamp,
-        audioBuffer: c.audioBuffer,
-      }))
+      perDeviceAudio // array of { userId, userName, audioKey }
     });
-    logger.info(`Sent transcript queue for meeting ${meetingId}: ${sorted.length} chunks`);
+
+    logger.info(`Per-device audio upload complete: ${perDeviceAudio.length} participants`);
   });
 
   socket.on('raise-hand', ({ meetingId }) => {
