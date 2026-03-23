@@ -145,7 +145,7 @@ export default function MeetingRoom({ meetingId, user }) {
             });
           }
         }).catch(e => console.warn('Chunk send failed:', e));
-      }, 30000);
+      }, 10000);
 
       recorder.start(1000);
       myRecorderRef.current = recorder;
