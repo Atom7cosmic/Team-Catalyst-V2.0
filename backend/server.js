@@ -145,6 +145,18 @@ const rooms = new Map();
 io.use(async (socket, next) => {
   const token = socket.handshake.auth.token;
   if (!token) return next(new Error('Authentication required'));
+
+  // ── Allow internal worker connections ──────────────────────────────────────
+  // Worker process connects via socket.io-client to emit processing updates
+  // It uses a shared token instead of a user JWT
+  const workerToken = process.env.WORKER_SOCKET_TOKEN || 'worker-internal';
+  if (token === workerToken) {
+    socket.userId = 'worker';
+    socket.user = { firstName: 'Worker', lastName: 'Process' };
+    return next();
+  }
+  // ──────────────────────────────────────────────────────────────────────────
+
   try {
     const jwt = require('jsonwebtoken');
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
@@ -165,6 +177,18 @@ io.on('connection', (socket) => {
     const last = socket.user?.lastName || '';
     return `${first} ${last}`.trim() || socket.user?.email || 'Participant';
   };
+
+  // ── Worker → Room broadcast relay ─────────────────────────────────────────
+  // Worker can't emit to rooms directly (separate process, no access to io).
+  // It sends worker-broadcast here and we relay it to the correct meeting room.
+  // This powers the real-time processing status toasts in the meeting room.
+  socket.on('worker-broadcast', ({ meetingId, event, data }) => {
+    if (meetingId && event) {
+      io.to(meetingId).emit(event, data);
+      logger.info(`Worker broadcast: ${event} → room ${meetingId}`);
+    }
+  });
+  // ──────────────────────────────────────────────────────────────────────────
 
   socket.on('join-room', ({ meetingId, userId }) => {
     socket.join(meetingId);
@@ -193,7 +217,7 @@ io.on('connection', (socket) => {
       .filter(u => u.socketId !== socket.id)
       .map(u => ({ userId: u.userId?.toString(), displayName: u.displayName }))
     );
-    socket.emit('participant-names', participants); // ← NEW: send full name map
+    socket.emit('participant-names', participants);
     socket.emit('recording-status', room.recording);
 
     // Update everyone's participant name map
@@ -201,14 +225,12 @@ io.on('connection', (socket) => {
   });
 
   socket.on('offer', ({ meetingId, offer, targetUserId }) => {
-    // Route offer only to the target user, not broadcast to everyone
     const room = rooms.get(meetingId);
     if (room) {
       const targetUser = room.users.find(u => u.userId?.toString() === targetUserId?.toString());
       if (targetUser) {
         io.to(targetUser.socketId).emit('offer', { offer, userId: socket.userId });
       } else {
-        // Fallback: broadcast to room
         socket.to(meetingId).emit('offer', { offer, userId: socket.userId });
       }
     }
@@ -264,7 +286,7 @@ io.on('connection', (socket) => {
       userName: displayName,
       timestamp: timestamp || Date.now(),
       audioBuffer: Buffer.from(audioChunk),
-      transcriptText: null // filled in by worker after transcription
+      transcriptText: null
     });
 
     logger.info(`Audio chunk queued for ${displayName} in meeting ${meetingId}, queue size: ${queue.length}`);
@@ -276,7 +298,7 @@ io.on('connection', (socket) => {
   socket.on('get-transcript-queue', async ({ meetingId }) => {
     const queue = transcriptQueue.get(meetingId) || [];
     if (queue.length === 0) {
-      socket.emit('transcript-queue', { meetingId, chunks: [] });
+      socket.emit('transcript-queue', { meetingId, perDeviceAudio: [] });
       return;
     }
 
@@ -295,7 +317,6 @@ io.on('connection', (socket) => {
 
     for (const [userId, data] of Object.entries(byUser)) {
       try {
-        // Merge all chunks for this user into one buffer
         const merged = Buffer.concat(data.buffers);
         const audioKey = `meetings/${meetingId}/device-${userId}-${Date.now()}.webm`;
         await uploadFile(audioKey, merged, 'audio/webm');
@@ -312,7 +333,7 @@ io.on('connection', (socket) => {
 
     socket.emit('transcript-queue', {
       meetingId,
-      perDeviceAudio // array of { userId, userName, audioKey }
+      perDeviceAudio
     });
 
     logger.info(`Per-device audio upload complete: ${perDeviceAudio.length} participants`);
@@ -380,8 +401,6 @@ io.on('connection', (socket) => {
         socket.to(meetingId).emit('user-disconnected', userId);
         if (room.users.length === 0) {
           rooms.delete(meetingId);
-          // Clean up transcript queue when room is empty
-          // Keep it for a bit in case worker needs it
           setTimeout(() => {
             if (!rooms.has(meetingId)) {
               transcriptQueue.delete(meetingId);

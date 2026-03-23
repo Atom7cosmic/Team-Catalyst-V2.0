@@ -96,7 +96,7 @@ export default function MeetingRoom({ meetingId, user }) {
 
   const handleFullscreen = useCallback((userId) => {
     if (fullscreenUserId === userId && isNativeFullscreen) {
-      document.exitFullscreen().catch(() => {});
+      document.exitFullscreen().catch(() => { });
       setFullscreenUserId(null);
     } else {
       setFullscreenUserId(userId);
@@ -111,7 +111,7 @@ export default function MeetingRoom({ meetingId, user }) {
   }, [fullscreenUserId, isNativeFullscreen]);
 
   const exitFullscreen = useCallback(() => {
-    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => { });
     setFullscreenUserId(null);
   }, []);
 
@@ -173,7 +173,7 @@ export default function MeetingRoom({ meetingId, user }) {
             timestamp: Date.now()
           });
         }
-      }).catch(() => {});
+      }).catch(() => { });
     }
     if (myRecorderRef.current && myRecorderRef.current.state !== 'inactive') {
       myRecorderRef.current.stop();
@@ -384,7 +384,7 @@ export default function MeetingRoom({ meetingId, user }) {
 
   const createPeer = (userId, initiator, stream, incomingOffer = null) => {
     if (peersRef.current[userId]) {
-      try { peersRef.current[userId].destroy(); } catch (e) {}
+      try { peersRef.current[userId].destroy(); } catch (e) { }
       delete peersRef.current[userId];
     }
 
@@ -454,7 +454,7 @@ export default function MeetingRoom({ meetingId, user }) {
 
   const destroyPeer = (userId) => {
     if (peersRef.current[userId]) {
-      try { peersRef.current[userId].destroy(); } catch (e) {}
+      try { peersRef.current[userId].destroy(); } catch (e) { }
       delete peersRef.current[userId];
     }
     setRemoteStreams(prev => { const n = { ...prev }; delete n[userId]; return n; });
@@ -469,8 +469,8 @@ export default function MeetingRoom({ meetingId, user }) {
     Object.keys(peersRef.current).forEach(destroyPeer);
     try {
       leaveRoom(meetingId, myId);
-      api.post(`/meetings/${meetingId}/leave`).catch(() => {});
-    } catch (e) {}
+      api.post(`/meetings/${meetingId}/leave`).catch(() => { });
+    } catch (e) { }
   };
 
   const toggleAudio = () => {
@@ -494,7 +494,7 @@ export default function MeetingRoom({ meetingId, user }) {
           try {
             const sender = peer._pc?.getSenders().find(s => s.track?.kind === 'video');
             if (sender) sender.replaceTrack(screenTrack);
-          } catch (e) {}
+          } catch (e) { }
         });
         if (localVideoRef.current) localVideoRef.current.srcObject = screenStream;
         screenTrack.onended = () => stopScreenShare();
@@ -515,7 +515,7 @@ export default function MeetingRoom({ meetingId, user }) {
         try {
           const sender = peer._pc?.getSenders().find(s => s.track?.kind === 'video');
           if (sender) sender.replaceTrack(cameraTrack);
-        } catch (e) {}
+        } catch (e) { }
       });
     }
     if (localVideoRef.current && localStreamRef.current) {
@@ -576,14 +576,9 @@ export default function MeetingRoom({ meetingId, user }) {
         try {
           toast.loading('Processing per-device audio...', { id: 'upload' });
 
-          // Step 1: Stop my own per-device recording and flush final chunks
-          stopMyRecording();
-
-          // Step 2: Ask server to upload all participants' device audio to S3
-          // Server merges chunks per user and returns S3 keys
+          // Flush final chunks first, then request transcript queue atomically
           const perDeviceAudio = await new Promise((resolve) => {
             const timeout = setTimeout(() => {
-              // If no response in 15s, proceed without per-device audio
               resolve([]);
             }, 15000);
 
@@ -592,10 +587,11 @@ export default function MeetingRoom({ meetingId, user }) {
               resolve(pda || []);
             });
 
+            stopMyRecording(); // flush final chunks first
             socketRef.current?.emit('get-transcript-queue', { meetingId });
           });
 
-          logger.info?.(`Per-device audio collected: ${perDeviceAudio.length} participants`);
+          console.log(`Per-device audio collected: ${perDeviceAudio.length} participants`);
 
           // Step 3: Upload mixed audio + per-device audio keys together
           const fd = new FormData();
@@ -778,7 +774,7 @@ export default function MeetingRoom({ meetingId, user }) {
                 videoRef={setLocalVideoRef} name={myName} isHost={isHost}
                 isAudioEnabled={isAudioEnabled} isVideoEnabled={isVideoEnabled}
                 isScreenSharing={isScreenSharing} isHandRaised={raisedHands.has(myId)}
-                isPinned={false} onPin={() => {}} onFullscreen={exitFullscreen}
+                isPinned={false} onPin={() => { }} onFullscreen={exitFullscreen}
                 isFullscreen large
               />
             ) : (
@@ -786,7 +782,7 @@ export default function MeetingRoom({ meetingId, user }) {
                 userId={fullscreenUserId} stream={remoteStreams[fullscreenUserId]}
                 name={getParticipantName(fullscreenUserId)}
                 isHandRaised={raisedHands.has(fullscreenUserId)}
-                isPinned={false} onPin={() => {}} onFullscreen={exitFullscreen}
+                isPinned={false} onPin={() => { }} onFullscreen={exitFullscreen}
                 isFullscreen large
               />
             )}
@@ -890,11 +886,11 @@ export default function MeetingRoom({ meetingId, user }) {
               // 7-9       → 3x3 grid
               // 10+       → 4 columns
               totalParticipants === 1 ? 'grid-cols-1 grid-rows-1' :
-              totalParticipants === 2 ? 'grid-cols-2 grid-rows-1' :
-              totalParticipants === 3 ? 'grid-cols-2 grid-rows-2' :
-              totalParticipants === 4 ? 'grid-cols-2 grid-rows-2' :
-              totalParticipants <= 6 ? 'grid-cols-3 grid-rows-2' :
-              totalParticipants <= 9 ? 'grid-cols-3 grid-rows-3' : 'grid-cols-4'
+                totalParticipants === 2 ? 'grid-cols-2 grid-rows-1' :
+                  totalParticipants === 3 ? 'grid-cols-2 grid-rows-2' :
+                    totalParticipants === 4 ? 'grid-cols-2 grid-rows-2' :
+                      totalParticipants <= 6 ? 'grid-cols-3 grid-rows-2' :
+                        totalParticipants <= 9 ? 'grid-cols-3 grid-rows-3' : 'grid-cols-4'
             )}>
               <LocalTile
                 videoRef={setLocalVideoRef} name={myName} isHost={isHost}
@@ -1063,9 +1059,9 @@ function CtrlBtn({ onClick, children, label, danger, highlight, warn }) {
       <button onClick={onClick} className={cn(
         'h-12 w-12 rounded-full border flex items-center justify-center transition-colors',
         danger ? 'bg-red-500/20 border-red-500/40 text-red-400 hover:bg-red-500/30' :
-        highlight ? 'bg-blue-500/20 border-blue-500/40 text-blue-400 hover:bg-blue-500/30' :
-        warn ? 'bg-yellow-500/20 border-yellow-500/40 text-yellow-400 hover:bg-yellow-500/30' :
-        'bg-slate-700 border-slate-600 text-slate-200 hover:bg-slate-600'
+          highlight ? 'bg-blue-500/20 border-blue-500/40 text-blue-400 hover:bg-blue-500/30' :
+            warn ? 'bg-yellow-500/20 border-yellow-500/40 text-yellow-400 hover:bg-yellow-500/30' :
+              'bg-slate-700 border-slate-600 text-slate-200 hover:bg-slate-600'
       )}>
         {children}
       </button>
