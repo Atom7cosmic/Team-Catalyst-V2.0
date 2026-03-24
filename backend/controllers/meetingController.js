@@ -371,7 +371,7 @@ exports.endMeeting = async (req, res) => {
       });
     }
 
-    if (['completed', 'cancelled', 'processing', 'ready'].includes(meeting.status)) {
+    if (['completed', 'cancelled'].includes(meeting.status)) {
       return res.status(400).json({
         success: false,
         message: `Meeting is already ${meeting.status}`

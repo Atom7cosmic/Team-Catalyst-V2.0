@@ -130,7 +130,7 @@ export default function MeetingRoom({ meetingId, user }) {
       recorder.ondataavailable = e => {
         if (e.data.size > 0) myChunksRef.current.push(e.data);
       };
- 
+
       // Every 10 seconds, send the accumulated chunk to the server
       chunkIntervalRef.current = setInterval(() => {
         if (myChunksRef.current.length === 0) return;
@@ -146,7 +146,7 @@ export default function MeetingRoom({ meetingId, user }) {
           }
         }).catch(e => console.warn('Chunk send failed:', e));
       }, 10000);
- 
+
       // FIX: Use 100ms timeslice so audio is captured immediately from the
       // very first word — previously 1000ms meant up to 1 second of speech
       // could be lost before the first chunk was written to the buffer.
@@ -666,19 +666,22 @@ export default function MeetingRoom({ meetingId, user }) {
     if (!isHost) return;
     setIsEndingMeeting(true);
     try {
-      // Auto-stop recording and wait for upload before ending meeting
+      // End the meeting in DB first — before upload changes status to 'processing'
+      await api.post(`/meetings/${meetingId}/end`);
+
+      // Now stop recording and trigger upload in background
       if (isRecording && mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-        toast.loading('Saving recording before ending...', { id: 'end-meeting' });
+        toast.loading('Saving recording...', { id: 'end-meeting' });
         mediaRecorderRef.current.stop();
         socketRef.current?.emit('stop-recording', { meetingId });
         setIsRecording(false);
-        // Wait for the upload to complete (onstop fires asynchronously)
+        // Give onstop time to fire and upload before we navigate away
         await new Promise(resolve => setTimeout(resolve, 8000));
         toast.dismiss('end-meeting');
       } else {
         stopMyRecording();
       }
-      await api.post(`/meetings/${meetingId}/end`);
+
       toast.success('Meeting ended');
       cleanup();
       router.push(`/meetings/${meetingId}`);
