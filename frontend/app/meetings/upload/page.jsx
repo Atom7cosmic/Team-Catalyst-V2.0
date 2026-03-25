@@ -58,7 +58,7 @@ export default function UploadMeetingPage() {
 
     try {
       const data = new FormData();
-      data.append('audio', file);
+      data.append('recording', file);  // ← matches upload.single('recording')
       data.append('name', formData.name);
       data.append('scheduledDate', formData.scheduledDate);
       data.append('domain', formData.domain);
