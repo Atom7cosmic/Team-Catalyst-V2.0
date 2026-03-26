@@ -502,6 +502,30 @@ async function processPerDeviceAudio(perDeviceAudio, meetingId) {
   // Stitch consecutive same-speaker segments where the previous segment
   // doesn't end with sentence-ending punctuation. This fixes broken
   // sentences that Whisper splits across multiple short segments.
+  // function stitchSegments(segments) {
+  //   if (!segments || segments.length === 0) return segments;
+  //   const stitched = [];
+  //   let current = { ...segments[0] };
+
+  //   for (let i = 1; i < segments.length; i++) {
+  //     const next = segments[i];
+  //     const sameSpeaker = current.speaker === next.speaker;
+  //     const incomplete = !/[.!?]$/.test(current.text.trim());
+  //     const closeInTime = (next.startTime - current.endTime) < 2.0; // within 2s gap
+
+  //     if (sameSpeaker && incomplete && closeInTime) {
+  //       current.text = current.text.trim() + ' ' + next.text.trim();
+  //       current.endTime = next.endTime;
+  //       current.end = next.endTime;
+  //     } else {
+  //       stitched.push(current);
+  //       current = { ...next };
+  //     }
+  //   }
+  //   stitched.push(current);
+  //   return stitched;
+  // }
+
   function stitchSegments(segments) {
     if (!segments || segments.length === 0) return segments;
     const stitched = [];
@@ -511,9 +535,25 @@ async function processPerDeviceAudio(perDeviceAudio, meetingId) {
       const next = segments[i];
       const sameSpeaker = current.speaker === next.speaker;
       const incomplete = !/[.!?]$/.test(current.text.trim());
-      const closeInTime = (next.startTime - current.endTime) < 2.0; // within 2s gap
 
-      if (sameSpeaker && incomplete && closeInTime) {
+      // ── FIX: Tighten the gap threshold from 2.0s to 0.6s ─────────────────
+      // 2.0s was too generous — it was stitching across segments that had
+      // other speakers' segments interleaved between them in real time.
+      // 0.6s only merges segments that Whisper split mid-breath with no
+      // meaningful pause, which is the only case stitching should fire.
+      const closeInTime = (next.startTime - current.endTime) < 0.6;
+
+      // ── FIX: Only stitch if no other speaker spoke in between ────────────
+      // Check that there is no segment from a different speaker whose
+      // startTime falls between current.startTime and next.startTime.
+      // If another speaker is interleaved, never stitch — preserve order.
+      const noInterleavedSpeaker = !segments.slice(0, i).some(prev =>
+        prev.speaker !== current.speaker &&
+        prev.startTime >= current.startTime &&
+        prev.startTime < next.startTime
+      );
+
+      if (sameSpeaker && incomplete && closeInTime && noInterleavedSpeaker) {
         current.text = current.text.trim() + ' ' + next.text.trim();
         current.endTime = next.endTime;
         current.end = next.endTime;
