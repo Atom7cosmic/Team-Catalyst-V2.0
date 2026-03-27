@@ -183,6 +183,17 @@ io.on('connection', (socket) => {
     }
   });
 
+  // ✅ Correct placement
+  socket.on('media-state', ({ meetingId, audio, video }) => {
+    if (!meetingId || !socket.userId) return;
+
+    socket.to(meetingId).emit('media-state-update', {
+      userId: socket.userId,
+      audio,
+      video
+    });
+  });
+
   socket.on('join-room', ({ meetingId, userId }) => {
     socket.join(meetingId);
 
