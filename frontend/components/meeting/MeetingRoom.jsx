@@ -1210,7 +1210,7 @@ function getAudioContext() {
   if (!_audioContext || _audioContext.state === 'closed') {
     _audioContext = new (window.AudioContext || window.webkitAudioContext)();
   }
-  if (_audioContext.state === 'suspended') _audioContext.resume().catch(() => {});
+  if (_audioContext.state === 'suspended') _audioContext.resume().catch(() => { });
   return _audioContext;
 }
 function unlockAudioContext() {
@@ -1239,7 +1239,7 @@ function useAudioLevel(stream, enabled, onLevel) {
       };
       rafRef.current = requestAnimationFrame(tick);
     } catch (e) { console.warn('AudioContext setup failed:', e.message); }
-    return () => { cancelled = true; if (rafRef.current) cancelAnimationFrame(rafRef.current); try { sourceRef.current?.disconnect(); } catch (_) {} try { analyserRef.current?.disconnect(); } catch (_) {} sourceRef.current = null; analyserRef.current = null; };
+    return () => { cancelled = true; if (rafRef.current) cancelAnimationFrame(rafRef.current); try { sourceRef.current?.disconnect(); } catch (_) { } try { analyserRef.current?.disconnect(); } catch (_) { } sourceRef.current = null; analyserRef.current = null; };
   }, [stream, enabled]);
 }
 
@@ -1360,27 +1360,61 @@ export default function MeetingRoom({ meetingId, user }) {
   }, []);
 
   const handleFullscreen = useCallback((userId) => {
-    if (fullscreenUserId === userId && isNativeFullscreen) { document.exitFullscreen().catch(() => {}); setFullscreenUserId(null); }
+    if (fullscreenUserId === userId && isNativeFullscreen) { document.exitFullscreen().catch(() => { }); setFullscreenUserId(null); }
     else { setFullscreenUserId(userId); setTimeout(() => { fullscreenContainerRef.current?.requestFullscreen().catch(e => console.warn('Fullscreen failed:', e.message)); }, 50); }
   }, [fullscreenUserId, isNativeFullscreen]);
 
-  const exitFullscreen = useCallback(() => { if (document.fullscreenElement) document.exitFullscreen().catch(() => {}); setFullscreenUserId(null); }, []);
+  const exitFullscreen = useCallback(() => { if (document.fullscreenElement) document.exitFullscreen().catch(() => { }); setFullscreenUserId(null); }, []);
 
   const startMyRecording = useCallback((stream) => {
-    if (!stream || myRecorderRef.current) return;
+    if (!stream) return;
+
+    // If a recorder is already running, stop it cleanly before restarting
+    if (myRecorderRef.current) {
+      try {
+        if (myRecorderRef.current.state !== 'inactive') myRecorderRef.current.stop();
+      } catch (_) { }
+      myRecorderRef.current = null;
+    }
+    if (chunkIntervalRef.current) {
+      clearInterval(chunkIntervalRef.current);
+      chunkIntervalRef.current = null;
+    }
+
     try {
       const audioOnly = new MediaStream(stream.getAudioTracks());
-      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm';
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+        ? 'audio/webm;codecs=opus' : 'audio/webm';
       const recorder = new MediaRecorder(audioOnly, { mimeType });
-      myChunksRef.current = []; myRecordingStartTimeRef.current = Date.now();
-      recorder.ondataavailable = e => { if (e.data.size > 0) myChunksRef.current.push(e.data); };
+
+      myChunksRef.current = [];
+      // Always set a fresh start time — never carry over from a previous session
+      myRecordingStartTimeRef.current = Date.now();
+
+      recorder.ondataavailable = e => {
+        if (e.data.size > 0) myChunksRef.current.push(e.data);
+      };
+
       chunkIntervalRef.current = setInterval(() => {
         if (!myChunksRef.current.length) return;
-        const blob = new Blob([...myChunksRef.current], { type: mimeType }); myChunksRef.current = [];
-        blob.arrayBuffer().then(buf => { socketRef.current?.emit('audio-chunk', { meetingId, audioChunk: buf, timestamp: Date.now(), recordingStartTime: myRecordingStartTimeRef.current }); }).catch(e => console.warn('Chunk send failed:', e));
+        const blob = new Blob([...myChunksRef.current], { type: mimeType });
+        myChunksRef.current = [];
+        blob.arrayBuffer().then(buf => {
+          socketRef.current?.emit('audio-chunk', {
+            meetingId,
+            audioChunk: buf,
+            timestamp: Date.now(),
+            recordingStartTime: myRecordingStartTimeRef.current
+          });
+        }).catch(e => console.warn('Chunk send failed:', e));
       }, 10000);
-      recorder.start(1000); myRecorderRef.current = recorder; setIsMyRecording(true);
-    } catch (e) { console.warn('Per-device recording failed:', e.message); }
+
+      recorder.start(1000);
+      myRecorderRef.current = recorder;
+      setIsMyRecording(true);
+    } catch (e) {
+      console.warn('Per-device recording failed:', e.message);
+    }
   }, [meetingId]);
 
   const stopMyRecording = useCallback(() => {
@@ -1388,7 +1422,7 @@ export default function MeetingRoom({ meetingId, user }) {
     if (myChunksRef.current.length > 0 && myRecorderRef.current) {
       const mimeType = myRecorderRef.current.mimeType || 'audio/webm';
       const blob = new Blob([...myChunksRef.current], { type: mimeType }); myChunksRef.current = [];
-      blob.arrayBuffer().then(buf => { socketRef.current?.emit('audio-chunk', { meetingId, audioChunk: buf, timestamp: Date.now(), recordingStartTime: myRecordingStartTimeRef.current }); }).catch(() => {});
+      blob.arrayBuffer().then(buf => { socketRef.current?.emit('audio-chunk', { meetingId, audioChunk: buf, timestamp: Date.now(), recordingStartTime: myRecordingStartTimeRef.current }); }).catch(() => { });
     }
     if (myRecorderRef.current?.state !== 'inactive') myRecorderRef.current?.stop();
     myRecorderRef.current = null; myRecordingStartTimeRef.current = null; setIsMyRecording(false);
@@ -1483,7 +1517,7 @@ export default function MeetingRoom({ meetingId, user }) {
   useEffect(() => { if (chatOpen) setUnreadCount(0); }, [chatOpen]);
 
   const createPeer = (userId, initiator, stream, incomingOffer = null) => {
-    if (peersRef.current[userId]) { try { peersRef.current[userId].destroy(); } catch (_) {} delete peersRef.current[userId]; }
+    if (peersRef.current[userId]) { try { peersRef.current[userId].destroy(); } catch (_) { } delete peersRef.current[userId]; }
     const peer = new SimplePeer({ initiator, trickle: true, stream, config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }, { urls: 'turn:autorack.proxy.rlwy.net:26677', username: 'catalyst', credential: 'catalyst123' }, { urls: 'turn:autorack.proxy.rlwy.net:26677?transport=tcp', username: 'catalyst', credential: 'catalyst123' }, { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' }] } });
     peer.on('signal', data => { if (!socketRef.current) return; if (data.type === 'offer') socketRef.current.emit('offer', { meetingId, offer: data, targetUserId: userId }); else if (data.type === 'answer') socketRef.current.emit('answer', { meetingId, answer: data, targetUserId: userId }); else if (data.candidate) socketRef.current.emit('ice-candidate', { meetingId, candidate: data, targetUserId: userId }); });
     peer.on('stream', remoteStream => { setRemoteStreams(prev => ({ ...prev, [userId]: remoteStream })); });
@@ -1494,7 +1528,7 @@ export default function MeetingRoom({ meetingId, user }) {
   };
 
   const destroyPeer = (userId) => {
-    try { peersRef.current[userId]?.destroy(); } catch (_) {}
+    try { peersRef.current[userId]?.destroy(); } catch (_) { }
     delete peersRef.current[userId];
     setRemoteStreams(prev => { const n = { ...prev }; delete n[userId]; return n; });
     setPinnedUserId(prev => prev === userId ? null : prev);
@@ -1506,7 +1540,7 @@ export default function MeetingRoom({ meetingId, user }) {
     localStreamRef.current?.getTracks().forEach(t => t.stop());
     localStreamRef.current = null;
     Object.keys(peersRef.current).forEach(destroyPeer);
-    try { leaveRoom(meetingId, myId); api.post(`/meetings/${meetingId}/leave`).catch(() => {}); } catch (_) {}
+    try { leaveRoom(meetingId, myId); api.post(`/meetings/${meetingId}/leave`).catch(() => { }); } catch (_) { }
   };
 
   // Toggle audio AND broadcast new state to all peers
@@ -1527,7 +1561,7 @@ export default function MeetingRoom({ meetingId, user }) {
 
   const stopScreenShare = useCallback(() => {
     const cameraTrack = localStreamRef.current?.getVideoTracks()[0];
-    if (cameraTrack) { Object.values(peersRef.current).forEach(peer => { try { const sender = peer._pc?.getSenders().find(s => s.track?.kind === 'video'); sender?.replaceTrack(cameraTrack); } catch (_) {} }); }
+    if (cameraTrack) { Object.values(peersRef.current).forEach(peer => { try { const sender = peer._pc?.getSenders().find(s => s.track?.kind === 'video'); sender?.replaceTrack(cameraTrack); } catch (_) { } }); }
     if (localVideoRef.current && localStreamRef.current) localVideoRef.current.srcObject = localStreamRef.current;
     setIsScreenSharing(false);
   }, []);
@@ -1537,7 +1571,7 @@ export default function MeetingRoom({ meetingId, user }) {
       if (!isScreenSharing) {
         const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: { cursor: 'always' }, audio: false });
         const screenTrack = screenStream.getVideoTracks()[0];
-        Object.values(peersRef.current).forEach(peer => { try { const sender = peer._pc?.getSenders().find(s => s.track?.kind === 'video'); sender?.replaceTrack(screenTrack); } catch (_) {} });
+        Object.values(peersRef.current).forEach(peer => { try { const sender = peer._pc?.getSenders().find(s => s.track?.kind === 'video'); sender?.replaceTrack(screenTrack); } catch (_) { } });
         if (localVideoRef.current) localVideoRef.current.srcObject = screenStream;
         screenTrack.onended = stopScreenShare; setIsScreenSharing(true);
       } else { stopScreenShare(); }
@@ -1634,9 +1668,9 @@ export default function MeetingRoom({ meetingId, user }) {
         <div ref={fullscreenContainerRef} className="fixed inset-0 z-50 bg-black flex flex-col">
           <div className="flex-1 min-h-0">
             {fullscreenUserId === 'local' ? (
-              <LocalTile videoRef={setLocalVideoRef} name={myName} isHost={isHost} isAudioEnabled={isAudioEnabled} isVideoEnabled={isVideoEnabled} isScreenSharing={isScreenSharing} isHandRaised={raisedHands.has(myId)} isPinned={false} onPin={() => {}} onFullscreen={exitFullscreen} isFullscreen large stream={localStreamRef.current} audioEnabled={isAudioEnabled} isActiveSpeaker={activeSpeakerId === myId} audioLevel={ringLevels[myId] || 0} onAudioLevel={lvl => handleAudioLevel(myId, lvl)} />
+              <LocalTile videoRef={setLocalVideoRef} name={myName} isHost={isHost} isAudioEnabled={isAudioEnabled} isVideoEnabled={isVideoEnabled} isScreenSharing={isScreenSharing} isHandRaised={raisedHands.has(myId)} isPinned={false} onPin={() => { }} onFullscreen={exitFullscreen} isFullscreen large stream={localStreamRef.current} audioEnabled={isAudioEnabled} isActiveSpeaker={activeSpeakerId === myId} audioLevel={ringLevels[myId] || 0} onAudioLevel={lvl => handleAudioLevel(myId, lvl)} />
             ) : (
-              <RemoteTile userId={fullscreenUserId} stream={remoteStreams[fullscreenUserId]} name={getParticipantName(fullscreenUserId)} isHandRaised={raisedHands.has(fullscreenUserId)} isPinned={false} onPin={() => {}} onFullscreen={exitFullscreen} isFullscreen large isActiveSpeaker={activeSpeakerId === fullscreenUserId} audioLevel={ringLevels[fullscreenUserId] || 0} onAudioLevel={lvl => handleAudioLevel(fullscreenUserId, lvl)} {...remoteProps(fullscreenUserId)} />
+              <RemoteTile userId={fullscreenUserId} stream={remoteStreams[fullscreenUserId]} name={getParticipantName(fullscreenUserId)} isHandRaised={raisedHands.has(fullscreenUserId)} isPinned={false} onPin={() => { }} onFullscreen={exitFullscreen} isFullscreen large isActiveSpeaker={activeSpeakerId === fullscreenUserId} audioLevel={ringLevels[fullscreenUserId] || 0} onAudioLevel={lvl => handleAudioLevel(fullscreenUserId, lvl)} {...remoteProps(fullscreenUserId)} />
             )}
           </div>
           <ControlsBar {...controlsProps} />

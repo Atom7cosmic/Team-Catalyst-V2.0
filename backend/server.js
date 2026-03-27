@@ -294,7 +294,7 @@ io.on('connection', (socket) => {
     // destroying timeline normalization entirely.
     // Fall back to chunkTime so the offset calculation stays accurate.
     let effectiveStartTime = recordingStartTime || chunkTime;
-    if (effectiveStartTime < chunkTime - 60000) {
+    if (effectiveStartTime < chunkTime - 15000) {
       logger.warn(`Stale recordingStartTime for ${displayName}: offset=${Math.round((chunkTime - effectiveStartTime) / 1000)}s — clamping to chunk time`);
       effectiveStartTime = chunkTime;
     }
@@ -399,6 +399,9 @@ io.on('connection', (socket) => {
     const room = rooms.get(meetingId);
     if (room) {
       room.recording = true;
+      // Clear any stale audio chunks from previous recording attempts
+      // so they don't contaminate the new session's timeline
+      transcriptQueue.set(meetingId, []);
       io.to(meetingId).emit('recording-started');
     }
   });
