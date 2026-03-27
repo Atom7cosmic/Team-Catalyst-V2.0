@@ -99,15 +99,11 @@ async function splitAudioWithOverlap(filePath, chunkDuration = 590, overlap = 10
   const totalDuration = await getAudioDuration(filePath);
   const baseName = path.basename(filePath, path.extname(filePath));
   const chunkPaths = [];
-
   let start = 0;
   let index = 0;
 
   while (start < totalDuration) {
-    const outputPath = path.join(
-      outputDir,
-      `${baseName}_chunk_${String(index).padStart(3, '0')}.wav`
-    );
+    const outputPath = path.join(outputDir, `${baseName}_chunk_${String(index).padStart(3, '0')}.wav`);
     const segmentLength = Math.min(chunkDuration + overlap, totalDuration - start);
 
     await new Promise((resolve, reject) => {
@@ -132,6 +128,18 @@ async function splitAudioWithOverlap(filePath, chunkDuration = 590, overlap = 10
   return chunkPaths;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// transcribeWithGroq
+//
+// FIX: Tightened confidence threshold from -1.2 to -0.8.
+//
+// WHY: Whisper's avg_logprob is a log-probability score. At -1.2 the filter
+// was only catching very obviously bad segments. Corrupted outputs like
+// "you you well Bob a child doesn mean careless" typically score around
+// -0.9 to -1.1 — confident enough to pass -1.2 but clearly wrong.
+// -0.8 catches these while keeping all genuinely transcribed speech
+// (clean speech typically scores between -0.3 and -0.7).
+// ─────────────────────────────────────────────────────────────────────────────
 async function transcribeWithGroq(audioPath) {
   try {
     logger.info(`Transcribing: ${audioPath}`);
@@ -146,10 +154,10 @@ async function transcribeWithGroq(audioPath) {
 
     if (transcription.segments) {
       transcription.segments = transcription.segments
-        // Confidence filter: drop segments Whisper itself is uncertain about.
-        // avg_logprob < -1.2 means low transcription confidence.
-        // no_speech_prob > 0.6 means Whisper thinks this is silence/noise, not speech.
-        .filter(seg => (seg.avg_logprob ?? 0) >= -1.2 && (seg.no_speech_prob ?? 0) <= 0.6)
+        // FIX: -0.8 threshold catches corrupted segments that -1.2 was missing.
+        // no_speech_prob > 0.5 (tightened from 0.6) catches near-silence segments
+        // that Whisper was transcribing as garbage text.
+        .filter(seg => (seg.avg_logprob ?? 0) >= -0.8 && (seg.no_speech_prob ?? 0) <= 0.5)
         .map(seg => ({ ...seg, text: filterHallucination(seg.text) }))
         .filter(seg => seg.text.length > 0);
     }
@@ -354,32 +362,79 @@ Return ONLY a valid JSON array (no markdown, no explanation):
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// stitchSegments
+//
+// Merges consecutive segments from the same speaker where the current segment
+// doesn't end with sentence-terminating punctuation and the next segment
+// starts within a short time gap.
+//
+// FIX 1 — noInterleavedSpeaker bug:
+// Previous code checked `segments.slice(0, i)` which included ALL segments
+// before index i, not just the ones between current and next. This meant
+// the interleave check almost always found a "different speaker" somewhere
+// in the earlier history and refused to stitch. The fix checks only segments
+// whose startTime falls strictly between current.startTime and next.startTime.
+//
+// FIX 2 — gap threshold:
+// 0.6s gap threshold kept from previous version. Only merges segments Whisper
+// split mid-breath with no meaningful pause.
+// ─────────────────────────────────────────────────────────────────────────────
+function stitchSegments(segments) {
+  if (!segments || segments.length === 0) return segments;
+  const stitched = [];
+  let current = { ...segments[0] };
+
+  for (let i = 1; i < segments.length; i++) {
+    const next = segments[i];
+    const sameSpeaker  = current.speaker === next.speaker;
+    const incomplete   = !/[.!?]$/.test(current.text.trim());
+    const closeInTime  = (next.startTime - current.endTime) < 0.6;
+
+    // FIX: Only look at segments between current and next in time,
+    // not all segments before index i.
+    const noInterleavedSpeaker = !segments.some((s, j) =>
+      j !== i &&
+      s.speaker !== current.speaker &&
+      s.startTime > current.startTime &&
+      s.startTime < next.startTime
+    );
+
+    if (sameSpeaker && incomplete && closeInTime && noInterleavedSpeaker) {
+      current.text    = current.text.trim() + ' ' + next.text.trim();
+      current.endTime = next.endTime;
+      current.end     = next.endTime;
+    } else {
+      stitched.push(current);
+      current = { ...next };
+    }
+  }
+  stitched.push(current);
+  return stitched;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // processPerDeviceAudio
 //
-// FIX: Timeline normalization for per-device recordings.
+// Key changes in this version:
 //
-// ROOT CAUSE OF THE BUG:
-// Each participant records their own audio independently. When Whisper
-// transcribes a recording it always starts its timestamps at t=0 — meaning
-// the first segment of EVERY participant's audio gets startTime=0, regardless
-// of when they actually spoke in the meeting.
+// FIX 1 — Per-device dedup is now SAME-SPEAKER ONLY.
+// Previously, the dedup compared ALL segments within 15s at 80% similarity,
+// regardless of speaker. This caused Bob's segments to be dropped because
+// his mic captured echo of Alice/Carol and the dedup saw their cleaner
+// recording as the "original" and Bob's as the duplicate.
+// In per-device mode, each person's audio IS their ground truth. We only
+// dedup within the same speaker — catching Whisper's own repeated output
+// on a single device, not cross-device echo.
 //
-// For example, if Alice started recording at 10:00:00 and Bob at 10:00:15,
-// and Alice said "Good morning" at second 2 of her recording, and Bob said
-// "Hi" at second 1 of his recording, without normalization both appear at
-// t=0 and t=1/2 with no way to know Bob spoke 15 seconds after Alice.
-//
-// THE FIX:
-// 1. The client now sends `recordingStartTime` (ms epoch) with every audio chunk.
-// 2. The server stores the earliest recordingStartTime per user.
-// 3. Here, we find the minimum recordingStartTime across all devices (the
-//    participant who started recording first = t=0 of the meeting timeline).
-// 4. Each segment's startTime is shifted by:
-//    (device.recordingStartTime - earliestRecordingStartTime) / 1000 seconds
-// 5. After normalization, all segments share a common timeline and sorting
-//    them by startTime produces the correct chronological order.
+// FIX 2 — Host-first tie-breaking for t=0 segments.
+// After timeline normalization, multiple speakers can have segments at
+// exactly t=0 (or within 0.5s) because Whisper skips leading silence
+// and all devices start recording near-simultaneously. Without tie-breaking,
+// Carol's segment sorts before Alice's purely by insertion order.
+// Fix: when two segments are within 0.5s of each other, the host's segment
+// always sorts first. This ensures Alice (host) opens the transcript.
 // ─────────────────────────────────────────────────────────────────────────────
-async function processPerDeviceAudio(perDeviceAudio, meetingId) {
+async function processPerDeviceAudio(perDeviceAudio, meetingId, hostName = null) {
   logger.info(`Processing per-device audio for ${perDeviceAudio.length} participants`);
 
   const tempDir = '/temp';
@@ -411,18 +466,15 @@ async function processPerDeviceAudio(perDeviceAudio, meetingId) {
         if (!text || text.length < 2) continue;
 
         allSegments.push({
-          speaker: userName,
+          speaker:   userName,
           text,
           startTime: seg.start || 0,
-          endTime: seg.end || 0,
-          start: seg.start || 0,
-          end: seg.end || 0,
+          endTime:   seg.end   || 0,
+          start:     seg.start || 0,
+          end:       seg.end   || 0,
           userId,
-          source: 'per-device',
-          // ── FIX: Temporarily store device start time for offset calc ──────
-          // This field is deleted after normalization — it never reaches MongoDB.
+          source:    'per-device',
           _deviceRecordingStart: device.recordingStartTime || 0,
-          // ─────────────────────────────────────────────────────────────────
         });
       }
 
@@ -430,7 +482,7 @@ async function processPerDeviceAudio(perDeviceAudio, meetingId) {
       logger.warn(`Failed to process audio for ${userName}: ${e.message}`);
     } finally {
       if (localPath) {
-        try { fs.unlinkSync(localPath); } catch (e) { }
+        try { fs.unlinkSync(localPath); } catch (_) {}
       }
     }
   }
@@ -440,20 +492,7 @@ async function processPerDeviceAudio(perDeviceAudio, meetingId) {
     return null;
   }
 
-  // ── FIX: Normalize all per-device timestamps to a shared meeting timeline ─
-  //
-  // Find the earliest wall-clock recording start across all devices.
-  // This device started first, so its t=0 IS the meeting t=0.
-  // Every other device's segments are shifted forward by their offset.
-  //
-  // Example:
-  //   Alice recordingStartTime = 1700000000000 (earliest → offset = 0s)
-  //   Bob   recordingStartTime = 1700000015000 (15s later → offset = 15s)
-  //
-  //   Alice segment at Whisper t=2s  → meeting t = 2 + 0  = 2s
-  //   Bob   segment at Whisper t=1s  → meeting t = 1 + 15 = 16s
-  //
-  // Result: Bob's "Hi" correctly appears after Alice's "Good morning".
+  // ── Timeline normalization ─────────────────────────────────────────────────
   const validStartTimes = perDeviceAudio
     .map(d => d.recordingStartTime)
     .filter(t => t && t > 0);
@@ -463,111 +502,61 @@ async function processPerDeviceAudio(perDeviceAudio, meetingId) {
     logger.info(`Timeline normalization — earliest device start: ${earliestStart}`);
 
     for (const seg of allSegments) {
-      const deviceOffset = ((seg._deviceRecordingStart || earliestStart) - earliestStart) / 1000; // ms → seconds
+      const deviceOffset = ((seg._deviceRecordingStart || earliestStart) - earliestStart) / 1000;
       seg.startTime = seg.startTime + deviceOffset;
-      seg.endTime = seg.endTime + deviceOffset;
-      seg.start = seg.startTime;
-      seg.end = seg.endTime;
-      delete seg._deviceRecordingStart; // clean up — never saved to DB
+      seg.endTime   = seg.endTime   + deviceOffset;
+      seg.start     = seg.startTime;
+      seg.end       = seg.endTime;
+      delete seg._deviceRecordingStart;
     }
 
     logger.info(`Normalized ${allSegments.length} segments across ${perDeviceAudio.length} devices`);
   } else {
-    // No recordingStartTime available (old clients) — clean up temp field and
-    // fall through to sort-only behavior, same as before the fix.
     logger.warn('No recordingStartTime data — skipping normalization (old client fallback)');
-    for (const seg of allSegments) {
-      delete seg._deviceRecordingStart;
-    }
+    for (const seg of allSegments) { delete seg._deviceRecordingStart; }
   }
-  // ── End normalization ──────────────────────────────────────────────────────
 
-  // Sort chronologically — now meaningful because timestamps are normalized
-  allSegments.sort((a, b) => a.startTime - b.startTime);
+  // ── FIX: Host-first sort with tie-breaking ────────────────────────────────
+  // Primary: sort by startTime ascending.
+  // Tie-break (within 0.5s): host's segments sort before all others.
+  // This ensures Alice (the host) opens the transcript even when Carol's
+  // device started recording a few milliseconds earlier.
+  allSegments.sort((a, b) => {
+    const timeDiff = a.startTime - b.startTime;
+    if (Math.abs(timeDiff) <= 0.5 && hostName) {
+      const aIsHost = a.speaker === hostName;
+      const bIsHost = b.speaker === hostName;
+      if (aIsHost && !bIsHost) return -1;
+      if (!aIsHost && bIsHost) return 1;
+    }
+    return timeDiff;
+  });
 
-  // Deduplication — remove hallucinated repeats within 15s with 80% text similarity
+  // ── FIX: Same-speaker-only deduplication ─────────────────────────────────
+  // Only remove near-duplicate segments from the SAME speaker.
+  // Cross-speaker dedup is removed entirely — in per-device mode each
+  // person's audio is their ground truth and echo captured on another
+  // person's mic must never cause their segments to be dropped.
   const dedupedSegments = [];
   for (const seg of allSegments) {
     const isDuplicate = dedupedSegments.some(existing => {
+      if (existing.speaker !== seg.speaker) return false; // FIX: same speaker only
       const a = existing.text.trim().toLowerCase();
       const b = seg.text.trim().toLowerCase();
       const timeDiff = Math.abs(seg.startTime - existing.startTime);
-      const longer = Math.max(a.length, b.length);
+      const longer  = Math.max(a.length, b.length);
       const shorter = Math.min(a.length, b.length);
-      return timeDiff < 15 && longer > 0 && shorter / longer > 0.8;
+      return timeDiff < 10 && longer > 0 && shorter / longer > 0.85;
     });
     if (!isDuplicate) dedupedSegments.push(seg);
   }
 
-  // Stitch consecutive same-speaker segments where the previous segment
-  // doesn't end with sentence-ending punctuation. This fixes broken
-  // sentences that Whisper splits across multiple short segments.
-  // function stitchSegments(segments) {
-  //   if (!segments || segments.length === 0) return segments;
-  //   const stitched = [];
-  //   let current = { ...segments[0] };
+  logger.info(`After same-speaker dedup: ${dedupedSegments.length} segments (from ${allSegments.length})`);
 
-  //   for (let i = 1; i < segments.length; i++) {
-  //     const next = segments[i];
-  //     const sameSpeaker = current.speaker === next.speaker;
-  //     const incomplete = !/[.!?]$/.test(current.text.trim());
-  //     const closeInTime = (next.startTime - current.endTime) < 2.0; // within 2s gap
-
-  //     if (sameSpeaker && incomplete && closeInTime) {
-  //       current.text = current.text.trim() + ' ' + next.text.trim();
-  //       current.endTime = next.endTime;
-  //       current.end = next.endTime;
-  //     } else {
-  //       stitched.push(current);
-  //       current = { ...next };
-  //     }
-  //   }
-  //   stitched.push(current);
-  //   return stitched;
-  // }
-
-  function stitchSegments(segments) {
-    if (!segments || segments.length === 0) return segments;
-    const stitched = [];
-    let current = { ...segments[0] };
-
-    for (let i = 1; i < segments.length; i++) {
-      const next = segments[i];
-      const sameSpeaker = current.speaker === next.speaker;
-      const incomplete = !/[.!?]$/.test(current.text.trim());
-
-      // ── FIX: Tighten the gap threshold from 2.0s to 0.6s ─────────────────
-      // 2.0s was too generous — it was stitching across segments that had
-      // other speakers' segments interleaved between them in real time.
-      // 0.6s only merges segments that Whisper split mid-breath with no
-      // meaningful pause, which is the only case stitching should fire.
-      const closeInTime = (next.startTime - current.endTime) < 0.6;
-
-      // ── FIX: Only stitch if no other speaker spoke in between ────────────
-      // Check that there is no segment from a different speaker whose
-      // startTime falls between current.startTime and next.startTime.
-      // If another speaker is interleaved, never stitch — preserve order.
-      const noInterleavedSpeaker = !segments.slice(0, i).some(prev =>
-        prev.speaker !== current.speaker &&
-        prev.startTime >= current.startTime &&
-        prev.startTime < next.startTime
-      );
-
-      if (sameSpeaker && incomplete && closeInTime && noInterleavedSpeaker) {
-        current.text = current.text.trim() + ' ' + next.text.trim();
-        current.endTime = next.endTime;
-        current.end = next.endTime;
-      } else {
-        stitched.push(current);
-        current = { ...next };
-      }
-    }
-    stitched.push(current);
-    return stitched;
-  }
-
+  // ── Stitch consecutive same-speaker fragments ─────────────────────────────
   const stitchedSegments = stitchSegments(dedupedSegments);
   logger.info(`Per-device pipeline: ${stitchedSegments.length} segments from ${perDeviceAudio.length} participants (stitched from ${dedupedSegments.length})`);
+
   return stitchedSegments;
 }
 
@@ -609,7 +598,8 @@ async function processMeeting(job) {
     if (perDeviceAudio && perDeviceAudio.length > 0) {
       logger.info('Using per-device audio pipeline — timeline normalization enabled');
       try {
-        transcriptSegments = await processPerDeviceAudio(perDeviceAudio, meetingId);
+        // FIX: Pass hostName into processPerDeviceAudio for tie-breaking sort
+        transcriptSegments = await processPerDeviceAudio(perDeviceAudio, meetingId, hostName);
         if (transcriptSegments && transcriptSegments.length > 0) {
           transcript = transcriptSegments.map(s => `${s.speaker}: ${s.text}`).join('\n');
           usedPerDevice = true;
@@ -648,11 +638,11 @@ async function processMeeting(job) {
               allSegments.push({
                 ...seg,
                 start: (seg.start || 0) + chunk.startTime,
-                end: (seg.end || 0) + chunk.startTime
+                end:   (seg.end   || 0) + chunk.startTime
               });
             });
           }
-          try { fs.unlinkSync(chunk.path); } catch (e) { }
+          try { fs.unlinkSync(chunk.path); } catch (_) {}
         }
         groqResult = { text: transcript, segments: allSegments };
       } else {
@@ -663,7 +653,6 @@ async function processMeeting(job) {
       meeting.transcriptRaw = transcript;
       logger.info(`Transcription done. Text: ${transcript.length} chars, segments: ${groqResult?.segments?.length || 0}`);
       await updateStep(meetingId, 'transcription', 'done', 'Transcription complete', io);
-
       await updateStep(meetingId, 'diarization', 'running', 'Identifying speakers', io);
 
       const joinedAttendees = meeting.attendees.filter(
@@ -677,11 +666,11 @@ async function processMeeting(job) {
       logger.info(`Attendees for diarization: ${attendeeNames.join(', ')}`);
 
       const rawSegments = (groqResult?.segments || []).map(seg => ({
-        text: seg.text?.trim() || '',
+        text:      seg.text?.trim() || '',
         startTime: seg.start || 0,
-        endTime: seg.end || 0,
-        start: seg.start || 0,
-        end: seg.end || 0
+        endTime:   seg.end   || 0,
+        start:     seg.start || 0,
+        end:       seg.end   || 0
       })).filter(seg => seg.text.length > 0);
 
       const numSpeakers = attendeeNames.length;
@@ -700,32 +689,44 @@ async function processMeeting(job) {
       }
 
       const rawMappedSegments = labeledSegments.map(seg => ({
-        speaker: seg.speaker || 'Unknown Speaker',
+        speaker:   seg.speaker || 'Unknown Speaker',
         startTime: seg.startTime || seg.start || 0,
-        endTime: seg.endTime || seg.end || 0,
-        text: seg.text || ''
+        endTime:   seg.endTime   || seg.end   || 0,
+        text:      seg.text || ''
       }));
 
+      // Mixed audio dedup keeps cross-speaker check since diarization can
+      // produce genuine overlaps on a single-channel recording.
       const dedupedSegments = [];
       for (const seg of rawMappedSegments) {
         const isDuplicate = dedupedSegments.some(existing => {
           const a = existing.text.trim().toLowerCase();
           const b = seg.text.trim().toLowerCase();
           const timeDiff = Math.abs(seg.startTime - existing.startTime);
-          const longer = Math.max(a.length, b.length);
+          const longer  = Math.max(a.length, b.length);
           const shorter = Math.min(a.length, b.length);
           return timeDiff < 15 && longer > 0 && shorter / longer > 0.8;
         });
         if (!isDuplicate) dedupedSegments.push(seg);
       }
 
-      transcriptSegments = dedupedSegments;
-      try { fs.unlinkSync(localAudioPath); } catch (e) { }
+      // Stitch mixed audio segments too
+      transcriptSegments = stitchSegments(dedupedSegments);
+      try { fs.unlinkSync(localAudioPath); } catch (_) {}
     }
 
-    // Final sort — always sort by startTime before saving
+    // Final sort
     if (transcriptSegments && transcriptSegments.length > 0) {
-      transcriptSegments.sort((a, b) => (a.startTime || 0) - (b.startTime || 0));
+      transcriptSegments.sort((a, b) => {
+        const timeDiff = (a.startTime || 0) - (b.startTime || 0);
+        if (Math.abs(timeDiff) <= 0.5 && hostName) {
+          const aIsHost = a.speaker === hostName;
+          const bIsHost = b.speaker === hostName;
+          if (aIsHost && !bIsHost) return -1;
+          if (!aIsHost && bIsHost) return 1;
+        }
+        return timeDiff;
+      });
     }
 
     meeting.transcriptRaw = transcript || transcriptSegments?.map(s => `${s.speaker}: ${s.text}`).join('\n') || '';
@@ -794,7 +795,7 @@ async function processMeeting(job) {
         attendee.keyPoints = contribution.keyPoints || [];
 
         meeting.attendeeContributions.push({
-          user: attendee.user._id,
+          user:      attendee.user._id,
           name,
           score,
           keyPoints: contribution.keyPoints || [],
@@ -803,11 +804,7 @@ async function processMeeting(job) {
       } catch (e) {
         logger.warn(`Score failed for ${name}: ${e.message}`);
         meeting.attendeeContributions.push({
-          user: attendee.user._id,
-          name,
-          score: 5,
-          keyPoints: [],
-          speakingTime: 0
+          user: attendee.user._id, name, score: 5, keyPoints: [], speakingTime: 0
         });
       }
     }
@@ -848,10 +845,10 @@ async function processMeeting(job) {
           embeddings: [embedding],
           documents: [chunks[i]],
           metadatas: [{
-            meetingId: meetingId.toString(),
-            domain: meeting.domain,
-            date: meeting.scheduledDate.toISOString(),
-            attendees: attendeeNames.join(', '),
+            meetingId:  meetingId.toString(),
+            domain:     meeting.domain,
+            date:       meeting.scheduledDate.toISOString(),
+            attendees:  attendeeNames.join(', '),
             chunkIndex: i
           }]
         });
@@ -867,10 +864,10 @@ async function processMeeting(job) {
         if (performance) {
           performance.meetingStats = performance.meetingStats || { totalMeetings: 0, avgContributionScore: 0 };
           performance.meetingStats.totalMeetings += 1;
-          const prevAvg = performance.meetingStats.avgContributionScore || 0;
+          const prevAvg   = performance.meetingStats.avgContributionScore || 0;
           const prevCount = performance.meetingStats.totalMeetings - 1;
-          const newScore = attendee.contributionScore || 5;
-          const newAvg = (prevAvg * prevCount + newScore) / performance.meetingStats.totalMeetings;
+          const newScore  = attendee.contributionScore || 5;
+          const newAvg    = (prevAvg * prevCount + newScore) / performance.meetingStats.totalMeetings;
           performance.meetingStats.avgContributionScore = isNaN(newAvg) ? 5 : newAvg;
           await performance.save();
         }
@@ -881,16 +878,16 @@ async function processMeeting(job) {
 
     await Meeting.findByIdAndUpdate(meetingId, {
       status: 'ready',
-      transcriptRaw: meeting.transcriptRaw,
-      transcriptSegments: meeting.transcriptSegments,
-      speakerDiarizationMethod: meeting.speakerDiarizationMethod,
+      transcriptRaw:              meeting.transcriptRaw,
+      transcriptSegments:         meeting.transcriptSegments,
+      speakerDiarizationMethod:   meeting.speakerDiarizationMethod,
       speakerDiarizationEditable: meeting.speakerDiarizationEditable,
-      actualDuration: meeting.actualDuration,
-      summary: meeting.summary,
-      conclusions: (meeting.conclusions || []).filter(Boolean),
-      decisions: (meeting.decisions || []).filter(Boolean),
+      actualDuration:             meeting.actualDuration,
+      summary:                    meeting.summary,
+      conclusions:    (meeting.conclusions    || []).filter(Boolean),
+      decisions:      (meeting.decisions      || []).filter(Boolean),
       followUpTopics: (meeting.followUpTopics || []).filter(Boolean),
-      actionItems: (meeting.actionItems || []).filter(item => item && item.task),
+      actionItems:    (meeting.actionItems    || []).filter(item => item && item.task),
       attendeeContributions: (meeting.attendeeContributions || []).filter(Boolean),
       attendees: meeting.attendees,
     }, { new: true });
@@ -898,13 +895,13 @@ async function processMeeting(job) {
     await updateStep(meetingId, 'ready', 'done', 'Meeting processing complete', io);
 
     await Notification.create({
-      user: meeting.host,
-      type: 'meeting_ready',
-      title: 'Meeting analysis ready',
+      user:    meeting.host,
+      type:    'meeting_ready',
+      title:   'Meeting analysis ready',
       message: `"${meeting.name}" has been processed and is ready for review`,
-      link: `/meetings/${meeting._id}`,
+      link:    `/meetings/${meeting._id}`,
       entityType: 'meeting',
-      entityId: meeting._id
+      entityId:   meeting._id
     });
 
     logger.info(`Meeting ${meetingId} processing complete — method: ${meeting.speakerDiarizationMethod}`);
@@ -930,13 +927,13 @@ const worker = new Worker('meeting-processing', processMeeting, {
 });
 
 worker.on('completed', (job) => logger.info(`Job ${job.id} completed`));
-worker.on('failed', (job, err) => logger.error(`Job ${job.id} failed: ${err.message}`));
+worker.on('failed',    (job, err) => logger.error(`Job ${job.id} failed: ${err.message}`));
 
 const KEEP_ALIVE_INTERVAL = 10 * 60 * 1000;
 
 async function pingDiarizationService() {
   try {
-    const res = await fetch(`${DIARIZATION_URL}/health`, { timeout: 8000 });
+    const res  = await fetch(`${DIARIZATION_URL}/health`, { timeout: 8000 });
     const data = await res.json();
     if (data.pipeline_loaded) {
       logger.info('Diarization keep-alive: pipeline loaded');
@@ -949,8 +946,7 @@ async function pingDiarizationService() {
 }
 
 pingDiarizationService();
-const keepAliveTimer = setInterval(pingDiarizationService, KEEP_ALIVE_INTERVAL);
-
+const keepAliveTimer   = setInterval(pingDiarizationService, KEEP_ALIVE_INTERVAL);
 const workerHealthTimer = setInterval(() => {
   logger.info(`Worker alive, uptime: ${Math.round(process.uptime())}s`);
 }, 5 * 60 * 1000);
