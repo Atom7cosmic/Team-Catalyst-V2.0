@@ -293,17 +293,6 @@ export default function MeetingRoom({ meetingId, user }) {
     } catch (e) { console.warn('Per-device recording failed:', e.message); }
   }, [meetingId]);
 
-  // const stopMyRecording = useCallback(() => {
-  //   if (chunkIntervalRef.current) { clearInterval(chunkIntervalRef.current); chunkIntervalRef.current = null; }
-  //   if (myChunksRef.current.length > 0 && myRecorderRef.current) {
-  //     const mimeType = myRecorderRef.current.mimeType || 'audio/webm';
-  //     const blob = new Blob([...myChunksRef.current], { type: mimeType }); myChunksRef.current = [];
-  //     blob.arrayBuffer().then(buf => { socketRef.current?.emit('audio-chunk', { meetingId, audioChunk: buf, timestamp: Date.now(), recordingStartTime: myRecordingStartTimeRef.current }); }).catch(() => { });
-  //   }
-  //   if (myRecorderRef.current?.state !== 'inactive') myRecorderRef.current?.stop();
-  //   myRecorderRef.current = null; myRecordingStartTimeRef.current = null; setIsMyRecording(false);
-  // }, [meetingId]);
-
   const stopMyRecording = useCallback(async () => {
     if (chunkIntervalRef.current) { clearInterval(chunkIntervalRef.current); chunkIntervalRef.current = null; }
     if (myChunksRef.current.length > 0 && myRecorderRef.current) {
