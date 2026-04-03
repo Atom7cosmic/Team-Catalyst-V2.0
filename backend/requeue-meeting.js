@@ -13,7 +13,6 @@ require('dotenv').config();
 const { Queue } = require('bullmq');
 const mongoose = require('mongoose');
 const { S3Client, ListObjectsV2Command } = require('@aws-sdk/client-s3');
-
 const MEETING_ID = process.argv[2];
 
 if (!MEETING_ID) {
@@ -54,6 +53,7 @@ async function run() {
   console.log(`\nConnecting to MongoDB...`);
   await mongoose.connect(process.env.MONGODB_URI);
 
+  require('./models');
   const Meeting = require('./models/Meeting');
 
   const meeting = await Meeting.findById(MEETING_ID)
@@ -72,12 +72,17 @@ async function run() {
 
   // ── Method 1: perDeviceAudioKeys on meeting document ─────────────────────
   if (meeting.perDeviceAudioKeys && meeting.perDeviceAudioKeys.length > 0) {
-    console.log(`\n✅ Method 1: Using perDeviceAudioKeys from meeting document`);
-    meeting.perDeviceAudioKeys.forEach(k => console.log(`  ${k.userName}: ${k.audioKey}`));
-    jobData = {
-      meetingId: MEETING_ID,
-      perDeviceAudio: meeting.perDeviceAudioKeys,
-    };
+    const hasChunks = meeting.perDeviceAudioKeys.some(k => k.chunks && k.chunks.length > 0);
+    if (hasChunks) {
+      console.log(`\n✅ Method 1: Using perDeviceAudioKeys (new chunk format) from meeting document`);
+      meeting.perDeviceAudioKeys.forEach(k => console.log(`  ${k.userName}: ${k.chunks?.length} chunks`));
+      jobData = {
+        meetingId: MEETING_ID,
+        perDeviceAudio: meeting.perDeviceAudioKeys,
+      };
+    } else {
+      console.log(`\n⚠️  perDeviceAudioKeys found but old format — falling through to S3 scan`);
+    }
   }
 
   // ── Method 2: recordingUrl on meeting document ────────────────────────────
@@ -134,12 +139,12 @@ async function run() {
   meeting.followUpTopics = [];
   meeting.attendeeContributions = [];
   meeting.processingSteps = [
-    { step: 'upload',        status: 'done',    timestamp: new Date() },
+    { step: 'upload', status: 'done', timestamp: new Date() },
     { step: 'transcription', status: 'pending' },
-    { step: 'diarization',   status: 'pending' },
-    { step: 'analysis',      status: 'pending' },
-    { step: 'embedding',     status: 'pending' },
-    { step: 'ready',         status: 'pending' },
+    { step: 'diarization', status: 'pending' },
+    { step: 'analysis', status: 'pending' },
+    { step: 'embedding', status: 'pending' },
+    { step: 'ready', status: 'pending' },
   ];
   await meeting.save();
   console.log(`\n✅ Meeting reset to processing`);
