@@ -545,6 +545,7 @@ const logger = winston.createLogger({
 const allowedOrigins = [
   'https://orgos-swart.vercel.app',
   'https://team-catalyst-v2-0.vercel.app',
+  'https://orgyx.vercel.app',
   'http://localhost:3000',
   'http://localhost:3001',
   process.env.FRONTEND_URL,
