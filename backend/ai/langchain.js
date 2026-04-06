@@ -184,7 +184,7 @@ const scoreAttendeeChain = async (attendeeName, transcript, domain, transcriptSe
 
       const substantiveSegments = attendeeSegments.filter(seg => {
         const text = seg.text.trim().toLowerCase();
-        const fillerWords = ['okay', 'ok', 'yes', 'yeah', 'sure', 'hmm', 'start', 'hi', 'hello', 'bye', 'thanks', 'thank you', 'alright', 'right', 'good', 'great'];
+        const fillerWords = ['okay', 'ok', 'yes', 'yeah', 'sure', 'hmm', 'start', 'hi', 'hello', 'bye', 'thanks', 'thank you', 'alright', 'right', 'good', 'great','thank you for watching!'];
         return text.split(' ').length > 3 && !fillerWords.includes(text.replace(/[^a-z]/g, ''));
       });
 
