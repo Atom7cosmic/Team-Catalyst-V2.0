@@ -309,6 +309,13 @@ async function processPerDeviceAudio(perDeviceAudio, meetingId) {
 
   const allSegments = [];
 
+  const meetingEpoch = Math.min(
+    ...perDeviceAudio
+      .filter(d => Array.isArray(d.chunks) && d.chunks.length > 0)
+      .flatMap(d => d.chunks.map(c => c.timestamp))
+      .filter(t => t && t > 0)
+  );
+
   for (const device of perDeviceAudio) {
     const { userId, userName } = device;
 
@@ -357,7 +364,7 @@ async function processPerDeviceAudio(perDeviceAudio, meetingId) {
           //   chunkStart = (timestamp - 10000) / 1000 = 20s
           //   absolute   = 20 + 2 = 22s ✓
           const chunkStartSeconds = timestamp
-            ? Math.max(0, (timestamp - CHUNK_DURATION_MS) / 1000)
+            ? Math.max(0, (timestamp - CHUNK_DURATION_MS - meetingEpoch) / 1000)
             : chunkIndex * (CHUNK_DURATION_MS / 1000);
 
           for (const seg of segments) {
@@ -365,15 +372,15 @@ async function processPerDeviceAudio(perDeviceAudio, meetingId) {
             if (!text || text.length < 2) continue;
 
             const absoluteStart = chunkStartSeconds + (seg.start || 0);
-            const absoluteEnd   = chunkStartSeconds + (seg.end   || 0);
+            const absoluteEnd = chunkStartSeconds + (seg.end || 0);
 
             allSegments.push({
-              speaker:   userName,
+              speaker: userName,
               text,
               startTime: absoluteStart,
-              endTime:   absoluteEnd,
-              start:     absoluteStart,
-              end:       absoluteEnd,
+              endTime: absoluteEnd,
+              start: absoluteStart,
+              end: absoluteEnd,
               userId,
               source: 'per-device-chunk'
             });
@@ -383,7 +390,7 @@ async function processPerDeviceAudio(perDeviceAudio, meetingId) {
         } catch (e) {
           logger.warn(`Failed chunk ${chunkIndex} for ${userName}: ${e.message}`);
         } finally {
-          if (localPath) { try { fs.unlinkSync(localPath); } catch (e) {} }
+          if (localPath) { try { fs.unlinkSync(localPath); } catch (e) { } }
         }
       }
 
@@ -418,12 +425,12 @@ async function processPerDeviceAudio(perDeviceAudio, meetingId) {
           if (!text || text.length < 2) continue;
 
           allSegments.push({
-            speaker:   userName,
+            speaker: userName,
             text,
             startTime: seg.start || 0,
-            endTime:   seg.end   || 0,
-            start:     seg.start || 0,
-            end:       seg.end   || 0,
+            endTime: seg.end || 0,
+            start: seg.start || 0,
+            end: seg.end || 0,
             userId,
             // Store for normalization below
             _deviceRecordingStart: device.recordingStartTime || 0,
@@ -434,7 +441,7 @@ async function processPerDeviceAudio(perDeviceAudio, meetingId) {
       } catch (e) {
         logger.warn(`Failed to process audio for ${userName}: ${e.message}`);
       } finally {
-        if (localPath) { try { fs.unlinkSync(localPath); } catch (e) {} }
+        if (localPath) { try { fs.unlinkSync(localPath); } catch (e) { } }
       }
     }
   }
@@ -461,9 +468,9 @@ async function processPerDeviceAudio(perDeviceAudio, meetingId) {
       for (const seg of oldFormatSegments) {
         const offset = ((seg._deviceRecordingStart || earliestStart) - earliestStart) / 1000;
         seg.startTime += offset;
-        seg.endTime   += offset;
-        seg.start      = seg.startTime;
-        seg.end        = seg.endTime;
+        seg.endTime += offset;
+        seg.start = seg.startTime;
+        seg.end = seg.endTime;
       }
     }
 
@@ -573,7 +580,7 @@ async function processMeeting(job) {
             });
           }
           timeOffset += 600;
-          try { fs.unlinkSync(chunk); } catch (e) {}
+          try { fs.unlinkSync(chunk); } catch (e) { }
         }
         groqResult = { text: transcript, segments: allSegments };
       } else {
@@ -645,7 +652,7 @@ async function processMeeting(job) {
       }
 
       transcriptSegments = dedupedSegments;
-      try { fs.unlinkSync(localAudioPath); } catch (e) {}
+      try { fs.unlinkSync(localAudioPath); } catch (e) { }
     }
 
     meeting.transcriptRaw = transcript || transcriptSegments?.map(s => `${s.speaker}: ${s.text}`).join('\n') || '';

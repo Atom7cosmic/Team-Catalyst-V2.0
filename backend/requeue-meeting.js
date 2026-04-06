@@ -8,7 +8,7 @@ require('dotenv').config();
 const { Queue } = require('bullmq');
 const mongoose = require('mongoose');
 const { S3Client, ListObjectsV2Command } = require('@aws-sdk/client-s3');
-
+q 
 const MEETING_ID = process.argv[2];
 
 if (!MEETING_ID) {
