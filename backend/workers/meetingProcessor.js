@@ -25,6 +25,9 @@ const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 const DIARIZATION_URL = process.env.DIARIZATION_URL || 'http://diarization:8001';
 
+// How long each per-device chunk is in ms (must match server.js interval)
+const CHUNK_DURATION_MS = 10000;
+
 async function updateStep(meetingId, step, status, message = null, io = null) {
   const meeting = await Meeting.findById(meetingId);
   if (meeting) {
@@ -92,12 +95,7 @@ async function transcribeWithGroq(audioPath) {
       file: audioStream,
       model: 'whisper-large-v3',
       response_format: 'verbose_json',
-      // Removed language: 'en' — forces English-only and mangles Hindi words
-      // like "matlab", "yaar", "kal tak". Without language lock, Whisper
-      // auto-detects Hinglish code-switching and transcribes Hindi words
-      // in Roman script as spoken.
       temperature: 0,
-      // Primes Whisper with common Hinglish vocabulary for Indian corporate meetings
       prompt: 'This is an Indian corporate meeting in Hinglish — a mix of English and Hindi spoken in Roman script. Transcribe Hindi words exactly as spoken in Roman script, do not translate. Common Hindi words: yaar, bhai, matlab, toh, na, haan, nahi, abhi, kal, aaj, kal tak, theek hai, bilkul, achha, dekho, suno, baat, kaam, karo, ho gaya, pending hai, stuck hai, kya hua, kyun, kab, jaldi, sahi hai, nahi nahi, aisa nahi. Common Hinglish phrases: sync karo, align karna hai, loop mein rakh, bandwidth nahi hai, approve karo, sign off chahiye, review pending, do din mein, ek ghante mein, toh basically, ek cheez batao, meeting reschedule karo, deadline miss ho gayi, blocker hai, escalate karo, wip hai.',
     });
     return transcription;
@@ -288,9 +286,20 @@ Return ONLY a valid JSON array (no markdown, no explanation):
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Per-device transcription pipeline
-// Each participant's audio is transcribed separately with their name already known
-// No pyannote needed — speaker attribution is 100% accurate
-// Segments are merged by timestamp to create a chronological transcript
+//
+// FIX: Now handles BOTH formats from server.js:
+//
+// NEW FORMAT (server.js sends chunks array):
+//   device = { userId, userName, recordingStartTime, chunks: [{audioKey, timestamp, chunkIndex}], audioKey: chunks[0].audioKey }
+//   Each chunk is a 10s slice. We transcribe each chunk independently and
+//   compute absolute timestamps using the chunk's wall-clock timestamp:
+//   absoluteTime = (chunkTimestamp - CHUNK_DURATION_MS) / 1000 + whisperRelativeSeconds
+//   This correctly places Bob at t=30s even if his Whisper output says t=0s
+//   because his recording started 30s into the meeting.
+//
+// OLD FORMAT (single audioKey — backward compat for requeue scripts):
+//   device = { userId, userName, recordingStartTime, audioKey }
+//   Uses recordingStartTime normalization as before.
 // ─────────────────────────────────────────────────────────────────────────────
 async function processPerDeviceAudio(perDeviceAudio, meetingId) {
   logger.info(`Processing per-device audio for ${perDeviceAudio.length} participants`);
@@ -301,49 +310,131 @@ async function processPerDeviceAudio(perDeviceAudio, meetingId) {
   const allSegments = [];
 
   for (const device of perDeviceAudio) {
-    const { userId, userName, audioKey } = device;
-    logger.info(`Transcribing audio for ${userName} (${userId})`);
+    const { userId, userName } = device;
 
-    let localPath = null;
-    try {
-      // Download this person's audio from S3
-      localPath = await downloadAudio(audioKey);
+    // ── Detect format ──────────────────────────────────────────────────────
+    const hasChunksArray = Array.isArray(device.chunks) && device.chunks.length > 0;
+    logger.info(`Processing ${userName} (${userId}) — format: ${hasChunksArray ? 'chunks array' : 'single audioKey'}`);
 
-      // Check file is valid and has content
-      const stat = fs.statSync(localPath);
-      if (stat.size < 1000) {
-        logger.warn(`Audio for ${userName} too small (${stat.size} bytes) — skipping`);
+    if (hasChunksArray) {
+      // ── NEW FORMAT: process each chunk independently ──────────────────────
+      // Sort chunks by chunkIndex to ensure correct order
+      const sortedChunks = [...device.chunks].sort((a, b) => (a.chunkIndex || 0) - (b.chunkIndex || 0));
+      let deviceSegmentCount = 0;
+
+      for (const chunk of sortedChunks) {
+        const { audioKey, timestamp, chunkIndex } = chunk;
+
+        if (!audioKey) {
+          logger.warn(`${userName} chunk ${chunkIndex} has no audioKey — skipping`);
+          continue;
+        }
+
+        let localPath = null;
+        try {
+          localPath = await downloadAudio(audioKey);
+
+          const stat = fs.statSync(localPath);
+          if (stat.size < 500) {
+            logger.warn(`${userName} chunk ${chunkIndex} too small (${stat.size} bytes) — skipping`);
+            continue;
+          }
+
+          const result = await transcribeWithGroq(localPath);
+          const segments = result?.segments || [];
+
+          // ── ABSOLUTE TIMESTAMP COMPUTATION ──────────────────────────────
+          // Whisper always starts at t=0 for each chunk file.
+          // chunk.timestamp is the wall-clock ms when this chunk was SENT,
+          // which is approximately chunkIndex * CHUNK_DURATION_MS ms after
+          // the recording started.
+          //
+          // Formula:
+          //   chunkStartSeconds = (chunkTimestamp - CHUNK_DURATION_MS) / 1000
+          //   absoluteSegmentStart = chunkStartSeconds + whisperRelativeStart
+          //
+          // Example: Bob's 3rd chunk (t=20s into meeting), Whisper says t=2s
+          //   chunkStart = (timestamp - 10000) / 1000 = 20s
+          //   absolute   = 20 + 2 = 22s ✓
+          const chunkStartSeconds = timestamp
+            ? Math.max(0, (timestamp - CHUNK_DURATION_MS) / 1000)
+            : chunkIndex * (CHUNK_DURATION_MS / 1000);
+
+          for (const seg of segments) {
+            const text = seg.text?.trim();
+            if (!text || text.length < 2) continue;
+
+            const absoluteStart = chunkStartSeconds + (seg.start || 0);
+            const absoluteEnd   = chunkStartSeconds + (seg.end   || 0);
+
+            allSegments.push({
+              speaker:   userName,
+              text,
+              startTime: absoluteStart,
+              endTime:   absoluteEnd,
+              start:     absoluteStart,
+              end:       absoluteEnd,
+              userId,
+              source: 'per-device-chunk'
+            });
+            deviceSegmentCount++;
+          }
+
+        } catch (e) {
+          logger.warn(`Failed chunk ${chunkIndex} for ${userName}: ${e.message}`);
+        } finally {
+          if (localPath) { try { fs.unlinkSync(localPath); } catch (e) {} }
+        }
+      }
+
+      logger.info(`${userName}: ${deviceSegmentCount} segments from ${sortedChunks.length} chunks`);
+
+    } else {
+      // ── OLD FORMAT: single audioKey (backward compat) ─────────────────────
+      const { audioKey } = device;
+
+      if (!audioKey) {
+        logger.warn(`${userName} has no audioKey and no chunks array — skipping`);
         continue;
       }
 
-      // Transcribe with Groq — speaker is already known, no diarization needed
-      const result = await transcribeWithGroq(localPath);
-      const segments = result?.segments || [];
+      let localPath = null;
+      try {
+        localPath = await downloadAudio(audioKey);
 
-      logger.info(`${userName}: ${segments.length} segments transcribed`);
+        const stat = fs.statSync(localPath);
+        if (stat.size < 1000) {
+          logger.warn(`Audio for ${userName} too small (${stat.size} bytes) — skipping`);
+          continue;
+        }
 
-      // Tag each segment with this person's name and real timestamps
-      for (const seg of segments) {
-        const text = seg.text?.trim();
-        if (!text || text.length < 2) continue;
+        const result = await transcribeWithGroq(localPath);
+        const segments = result?.segments || [];
 
-        allSegments.push({
-          speaker: userName,
-          text,
-          startTime: seg.start || 0,
-          endTime: seg.end || 0,
-          start: seg.start || 0,
-          end: seg.end || 0,
-          userId,
-          source: 'per-device' // mark as per-device for debugging
-        });
-      }
+        logger.info(`${userName}: ${segments.length} segments transcribed (old format)`);
 
-    } catch (e) {
-      logger.warn(`Failed to process audio for ${userName}: ${e.message}`);
-    } finally {
-      if (localPath) {
-        try { fs.unlinkSync(localPath); } catch (e) {}
+        for (const seg of segments) {
+          const text = seg.text?.trim();
+          if (!text || text.length < 2) continue;
+
+          allSegments.push({
+            speaker:   userName,
+            text,
+            startTime: seg.start || 0,
+            endTime:   seg.end   || 0,
+            start:     seg.start || 0,
+            end:       seg.end   || 0,
+            userId,
+            // Store for normalization below
+            _deviceRecordingStart: device.recordingStartTime || 0,
+            source: 'per-device-single'
+          });
+        }
+
+      } catch (e) {
+        logger.warn(`Failed to process audio for ${userName}: ${e.message}`);
+      } finally {
+        if (localPath) { try { fs.unlinkSync(localPath); } catch (e) {} }
       }
     }
   }
@@ -353,24 +444,57 @@ async function processPerDeviceAudio(perDeviceAudio, meetingId) {
     return null;
   }
 
-  // Sort all segments by start time to create chronological transcript
+  // ── Timeline normalization for old-format segments ─────────────────────────
+  // New-format chunks already have absolute timestamps from the computation above.
+  // Old-format single-file segments need recordingStartTime normalization.
+  const oldFormatSegments = allSegments.filter(s => s.source === 'per-device-single');
+  if (oldFormatSegments.length > 0) {
+    const validStartTimes = perDeviceAudio
+      .filter(d => !Array.isArray(d.chunks))
+      .map(d => d.recordingStartTime)
+      .filter(t => t && t > 0);
+
+    if (validStartTimes.length > 0) {
+      const earliestStart = Math.min(...validStartTimes);
+      logger.info(`Old-format timeline normalization — earliest: ${earliestStart}`);
+
+      for (const seg of oldFormatSegments) {
+        const offset = ((seg._deviceRecordingStart || earliestStart) - earliestStart) / 1000;
+        seg.startTime += offset;
+        seg.endTime   += offset;
+        seg.start      = seg.startTime;
+        seg.end        = seg.endTime;
+      }
+    }
+
+    // Clean up temp field
+    for (const seg of allSegments) {
+      delete seg._deviceRecordingStart;
+    }
+  }
+
+  // Sort chronologically
   allSegments.sort((a, b) => a.startTime - b.startTime);
 
-  // Deduplication — remove hallucinated repeats within 15 seconds with 80% similarity
+  // ── Deduplication ──────────────────────────────────────────────────────────
+  // FIX: Only deduplicate within the same speaker.
+  // Cross-speaker dedup was eating Bob's segments when his mic captured
+  // echo of Alice — his segments were 80%+ similar to hers and got dropped.
   const dedupedSegments = [];
   for (const seg of allSegments) {
     const isDuplicate = dedupedSegments.some(existing => {
+      if (existing.speaker !== seg.speaker) return false; // never dedup across speakers
       const a = existing.text.trim().toLowerCase();
       const b = seg.text.trim().toLowerCase();
       const timeDiff = Math.abs(seg.startTime - existing.startTime);
       const longer = Math.max(a.length, b.length);
       const shorter = Math.min(a.length, b.length);
-      return timeDiff < 15 && longer > 0 && shorter / longer > 0.8;
+      return timeDiff < 10 && longer > 0 && shorter / longer > 0.85;
     });
     if (!isDuplicate) dedupedSegments.push(seg);
   }
 
-  logger.info(`Per-device pipeline complete: ${dedupedSegments.length} segments from ${perDeviceAudio.length} participants`);
+  logger.info(`Per-device pipeline: ${dedupedSegments.length} segments from ${perDeviceAudio.length} participants`);
   return dedupedSegments;
 }
 
@@ -400,7 +524,6 @@ async function processMeeting(job) {
     let usedPerDevice = false;
 
     // ── PATH 1: Per-device audio (preferred) ─────────────────────────────────
-    // Each person's audio is transcribed separately — speaker attribution is perfect
     if (perDeviceAudio && perDeviceAudio.length > 0) {
       logger.info('Using per-device audio pipeline — no diarization needed');
       try {
@@ -419,8 +542,6 @@ async function processMeeting(job) {
     }
 
     // ── PATH 2: Mixed audio fallback ─────────────────────────────────────────
-    // Used when per-device audio is unavailable or failed
-    // Falls back to Groq transcription + pyannote/LLM diarization
     if (!usedPerDevice && audioKey) {
       logger.info('Using mixed audio pipeline with diarization');
 
@@ -464,7 +585,6 @@ async function processMeeting(job) {
       logger.info(`Transcription done. Text: ${transcript.length} chars, segments: ${groqResult?.segments?.length || 0}`);
       await updateStep(meetingId, 'transcription', 'done', 'Transcription complete', io);
 
-      // Diarization step for mixed audio
       await updateStep(meetingId, 'diarization', 'running', 'Identifying speakers', io);
 
       const joinedAttendees = meeting.attendees.filter(
@@ -511,7 +631,6 @@ async function processMeeting(job) {
         text: seg.text || ''
       }));
 
-      // Dedup
       const dedupedSegments = [];
       for (const seg of rawMappedSegments) {
         const isDuplicate = dedupedSegments.some(existing => {
@@ -529,13 +648,11 @@ async function processMeeting(job) {
       try { fs.unlinkSync(localAudioPath); } catch (e) {}
     }
 
-    // Set final segments
     meeting.transcriptRaw = transcript || transcriptSegments?.map(s => `${s.speaker}: ${s.text}`).join('\n') || '';
     meeting.transcriptSegments = transcriptSegments || [];
     meeting.speakerDiarizationEditable = true;
 
     if (usedPerDevice) {
-      // Skip diarization step for per-device — already done
       await updateStep(meetingId, 'transcription', 'done', `Transcribed ${perDeviceAudio.length} participants`, io);
       await updateStep(meetingId, 'diarization', 'done', 'Speaker attribution via per-device audio — 100% accurate', io);
     } else {
@@ -735,7 +852,6 @@ const worker = new Worker('meeting-processing', processMeeting, {
 worker.on('completed', (job) => logger.info(`Job ${job.id} completed`));
 worker.on('failed', (job, err) => logger.error(`Job ${job.id} failed: ${err.message}`));
 
-// Keep HuggingFace Space warm — ping every 10 minutes
 const KEEP_ALIVE_INTERVAL = 10 * 60 * 1000;
 
 async function pingDiarizationService() {

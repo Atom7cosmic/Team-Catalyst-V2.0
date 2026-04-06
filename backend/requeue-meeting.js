@@ -1,11 +1,6 @@
 /**
- * Requeue any meeting for reprocessing — no logs needed.
+ * Requeue any meeting for reprocessing.
  * Usage: node requeue-meeting.js <meetingId>
- *
- * Works in 3 ways (tries each in order):
- * 1. Uses perDeviceAudioKeys saved on the meeting document (per-device pipeline)
- * 2. Uses recordingUrl saved on the meeting document (mixed audio pipeline)
- * 3. Scans S3 for audio files for this meeting (fallback)
  */
 
 require('dotenv').config();
@@ -13,6 +8,7 @@ require('dotenv').config();
 const { Queue } = require('bullmq');
 const mongoose = require('mongoose');
 const { S3Client, ListObjectsV2Command } = require('@aws-sdk/client-s3');
+
 const MEETING_ID = process.argv[2];
 
 if (!MEETING_ID) {
@@ -70,7 +66,7 @@ async function run() {
 
   let jobData = null;
 
-  // ── Method 1: perDeviceAudioKeys on meeting document ─────────────────────
+  // ── Method 1: perDeviceAudioKeys with new chunk format ───────────────────
   if (meeting.perDeviceAudioKeys && meeting.perDeviceAudioKeys.length > 0) {
     const hasChunks = meeting.perDeviceAudioKeys.some(k => k.chunks && k.chunks.length > 0);
     if (hasChunks) {
@@ -85,44 +81,81 @@ async function run() {
     }
   }
 
-  // ── Method 2: recordingUrl on meeting document ────────────────────────────
-  if (!jobData && meeting.recordingUrl) {
-    console.log(`\n✅ Method 2: Using recordingUrl from meeting document`);
-    console.log(`  Recording: ${meeting.recordingUrl}`);
-    jobData = {
-      meetingId: MEETING_ID,
-      audioKey: meeting.recordingUrl,
-    };
-  }
-
-  // ── Method 3: Scan S3 ─────────────────────────────────────────────────────
+  // ── Method 2: Scan S3 for per-device chunks (PRIORITY over recordingUrl) ─
+  // We always prefer per-device chunks over the combined recording because:
+  // 1. Per-device gives perfect speaker attribution
+  // 2. The combined recording may be corrupted or incomplete
   if (!jobData) {
-    console.log(`\n⚠️  No audio keys in DB — scanning S3...`);
+    console.log(`\n🔍 Scanning S3 for per-device chunks...`);
     const { deviceFiles, recordingFile } = await scanS3ForAudio(MEETING_ID);
 
     if (deviceFiles.length > 0) {
-      console.log(`✅ Method 3a: Found ${deviceFiles.length} per-device files in S3`);
+      console.log(`✅ Found ${deviceFiles.length} per-device chunk files in S3`);
 
-      const perDeviceAudio = deviceFiles.map(key => {
-        const match = key.match(/device-([a-f0-9]+)-/);
-        const userId = match?.[1];
-        const attendee = meeting.attendees.find(a => a.user?._id?.toString() === userId);
-        const userName = attendee
-          ? `${attendee.user.firstName} ${attendee.user.lastName}`
-          : 'Unknown Speaker';
-        return { userId, userName, audioKey: key };
+      // Group files by userId and sort by chunkIndex
+      const byUser = {};
+      for (const key of deviceFiles) {
+        // Match new format: device-{userId}-chunk{N}-{timestamp}.webm
+        const newMatch = key.match(/device-([a-f0-9]+)-chunk(\d+)-(\d+)\.webm/);
+        // Match old format: device-{userId}-{timestamp}.webm
+        const oldMatch = !newMatch && key.match(/device-([a-f0-9]+)-(\d+)\.webm/);
+
+        if (newMatch) {
+          const [, userId, chunkIndex, timestamp] = newMatch;
+          if (!byUser[userId]) {
+            const attendee = meeting.attendees.find(a => a.user?._id?.toString() === userId);
+            byUser[userId] = {
+              userId,
+              userName: attendee ? `${attendee.user.firstName} ${attendee.user.lastName}` : 'Unknown Speaker',
+              chunks: [],
+            };
+          }
+          byUser[userId].chunks.push({
+            audioKey: key,
+            timestamp: parseInt(timestamp),
+            chunkIndex: parseInt(chunkIndex),
+          });
+        } else if (oldMatch) {
+          // Old format — single file per user
+          const [, userId, timestamp] = oldMatch;
+          const attendee = meeting.attendees.find(a => a.user?._id?.toString() === userId);
+          const userName = attendee
+            ? `${attendee.user.firstName} ${attendee.user.lastName}`
+            : 'Unknown Speaker';
+          if (!byUser[userId]) {
+            byUser[userId] = { userId, userName, chunks: [] };
+          }
+          byUser[userId].chunks.push({
+            audioKey: key,
+            timestamp: parseInt(timestamp),
+            chunkIndex: 0,
+          });
+        }
+      }
+
+      // Sort chunks by chunkIndex and compute recordingStartTime
+      const perDeviceAudio = Object.values(byUser).map(u => {
+        u.chunks.sort((a, b) => a.chunkIndex - b.chunkIndex);
+        // recordingStartTime = timestamp of chunk0 - 10s (chunk covers [start, start+10s])
+        u.recordingStartTime = (u.chunks[0]?.timestamp || 0) - 10000;
+        console.log(`  ${u.userName}: ${u.chunks.length} chunks, startTime: ${u.recordingStartTime}`);
+        return u;
       });
 
-      perDeviceAudio.forEach(p => console.log(`  ${p.userName}: ${p.audioKey}`));
       jobData = { meetingId: MEETING_ID, perDeviceAudio };
 
     } else if (recordingFile) {
-      console.log(`✅ Method 3b: Found mixed recording in S3`);
+      console.log(`✅ No per-device chunks found — using mixed recording`);
       console.log(`  Recording: ${recordingFile}`);
       jobData = { meetingId: MEETING_ID, audioKey: recordingFile };
 
+    } else if (meeting.recordingUrl) {
+      console.log(`✅ Using recordingUrl from meeting document`);
+      console.log(`  Recording: ${meeting.recordingUrl}`);
+      jobData = { meetingId: MEETING_ID, audioKey: meeting.recordingUrl };
+
     } else {
-      console.error(`❌ No audio files found in S3 for meeting ${MEETING_ID}`);
+      console.error(`❌ No audio files found for meeting ${MEETING_ID}`);
       process.exit(1);
     }
   }
