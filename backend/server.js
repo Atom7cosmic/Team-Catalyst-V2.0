@@ -292,17 +292,34 @@ io.on('connection', (socket) => {
     const now = Date.now();
     const chunkTime = timestamp || now;
 
-    // Validate recordingStartTime — reject stale values
-    let effectiveStartTime = recordingStartTime || chunkTime;
-    if (effectiveStartTime < chunkTime - 15000) {
-      logger.warn(`Stale recordingStartTime for ${displayName}: offset=${Math.round((chunkTime - effectiveStartTime) / 1000)}s — clamping`);
-      effectiveStartTime = chunkTime - CHUNK_DURATION_MS;
+    // BUG 5 FIX: Do NOT clamp recordingStartTime.
+    //
+    // The old clamp (effectiveStartTime < chunkTime - 15000 → clamp to chunkTime - 10s)
+    // was designed to reject "stale" start times, but it fires for any participant
+    // who joined more than 15s after the meeting started (e.g. Bob joins at t=20s).
+    // The clamp shifts Bob's recordingStartTime FORWARD to chunkTime - 10s, making
+    // him look like he started 10s into the meeting instead of 20s. This places Bob's
+    // segments 10s too early on the shared timeline, causing overlap with Alice's
+    // segments at the same timestamps. The dedup pass then merges them under the
+    // wrong speaker.
+    //
+    // The correct approach: trust recordingStartTime from the client. It is set at
+    // MediaRecorder.start() — the true wall-clock start for that device. If it is
+    // missing (old client), fall back to chunkTime only. No clamping.
+    const effectiveStartTime = (recordingStartTime && recordingStartTime > 0)
+      ? recordingStartTime
+      : chunkTime;
+
+    // Sanity log only — no mutation of the value
+    const offsetSeconds = Math.round((chunkTime - effectiveStartTime) / 1000);
+    if (offsetSeconds > 300) {
+      logger.warn(`${displayName} recordingStartTime is ${offsetSeconds}s before chunkTime — keeping as-is (late joiner or clock skew)`);
     }
 
     queue.push({
       userId: socket.userId,
       userName: displayName,
-      timestamp: chunkTime,               // wall clock when this chunk was sent
+      timestamp: chunkTime,
       recordingStartTime: effectiveStartTime,
       audioBuffer: Buffer.from(audioChunk),
     });

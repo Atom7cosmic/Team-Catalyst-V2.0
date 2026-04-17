@@ -154,6 +154,7 @@ export default function MeetingRoom({ meetingId, user }) {
   const mediaRecorderRef = useRef(null), myRecorderRef = useRef(null), recordingChunksRef = useRef([]);
   const myChunksRef = useRef([]), chunkIntervalRef = useRef(null), chatBottomRef = useRef(null), fullscreenContainerRef = useRef(null);
   const myRecordingStartTimeRef = useRef(null), audioLevelsRef = useRef({});
+  const initSegmentRef = useRef(null);
 
   const [networkWarning, setNetworkWarning] = useState(false);
   const networkWarningTimerRef = useRef(null);
@@ -252,13 +253,11 @@ export default function MeetingRoom({ meetingId, user }) {
       const recorder = new MediaRecorder(audioOnly, { mimeType });
       myChunksRef.current = [];
       myRecordingStartTimeRef.current = Date.now();
-      let initSegment = null;
-      let isFirstChunk = true;
+      initSegmentRef.current = null;
       recorder.ondataavailable = e => {
         if (e.data.size > 0) {
-          if (isFirstChunk) {
-            initSegment = e.data;
-            isFirstChunk = false;
+          if (!initSegmentRef.current) {
+            initSegmentRef.current = e.data;
           }
           myChunksRef.current.push(e.data);
         }
@@ -267,8 +266,8 @@ export default function MeetingRoom({ meetingId, user }) {
         if (!myChunksRef.current.length) return;
         const chunks = [...myChunksRef.current];
         myChunksRef.current = [];
-        const blobChunks = (initSegment && chunks[0] !== initSegment)
-          ? [initSegment, ...chunks]
+        const blobChunks = (initSegmentRef.current && chunks[0] !== initSegmentRef.current)
+          ? [initSegmentRef.current, ...chunks]
           : chunks;
         const blob = new Blob(blobChunks, { type: mimeType });
         blob.arrayBuffer().then(buf => {
@@ -290,7 +289,13 @@ export default function MeetingRoom({ meetingId, user }) {
     if (chunkIntervalRef.current) { clearInterval(chunkIntervalRef.current); chunkIntervalRef.current = null; }
     if (myChunksRef.current.length > 0 && myRecorderRef.current) {
       const mimeType = myRecorderRef.current.mimeType || 'audio/webm';
-      const blob = new Blob([...myChunksRef.current], { type: mimeType }); myChunksRef.current = [];
+      const blob = new Blob(
+        (initSegmentRef.current && myChunksRef.current[0] !== initSegmentRef.current)
+          ? [initSegmentRef.current, ...myChunksRef.current]
+          : myChunksRef.current,
+        { type: mimeType }
+      );
+      myChunksRef.current = [];
       try {
         const buf = await blob.arrayBuffer();
         if (socketRef.current?.connected) {
@@ -305,7 +310,7 @@ export default function MeetingRoom({ meetingId, user }) {
       } catch (_) { }
     }
     if (myRecorderRef.current?.state !== 'inactive') myRecorderRef.current?.stop();
-    myRecorderRef.current = null; myRecordingStartTimeRef.current = null; setIsMyRecording(false);
+    myRecorderRef.current = null; myRecordingStartTimeRef.current = null; initSegmentRef.current = null; setIsMyRecording(false);
   }, [meetingId]);
 
   useEffect(() => {
