@@ -1,12 +1,15 @@
 import { io } from 'socket.io-client';
 
-const SOCKET_URL = process.env.NEXT_PUBLIC_SOCKET_URL || 'http://localhost:5001';
+const SOCKET_URL = process.env.NEXT_PUBLIC_SOCKET_URL || "https://orgyx-backend.onrender.com";
 
 let socket = null;
 
 export const getSocket = () => {
   if (!socket) {
-    const token = localStorage.getItem('accessToken');
+    let token = null;
+    if (typeof window !== 'undefined') {
+      token = localStorage.getItem('accessToken');
+    }
     socket = io(SOCKET_URL, {
       auth: { token },
       transports: ['websocket', 'polling'],

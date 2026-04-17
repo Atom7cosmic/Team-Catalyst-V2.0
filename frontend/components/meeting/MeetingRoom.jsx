@@ -54,19 +54,6 @@ function useAudioLevel(stream, enabled, onLevel) {
   }, [stream, enabled]);
 }
 
-// ── FIX 1: Presentation-style speaker switching ───────────────────────────
-// SPEAKING_THRESHOLD raised 0.08 → 0.12: background noise in quiet rooms
-// sits between 0.04–0.10. 0.12 filters it out. In noisy rooms actual speech
-// is still well above this value so it works in both environments.
-//
-// SPEAKING_DEBOUNCE raised 400ms → 2000ms: a speaker must sustain audio
-// above threshold for 2 full seconds before the view switches to them.
-// Prevents flickering when multiple people speak briefly in sequence.
-//
-// SILENCE_GRACE raised 900ms → 3000ms: the view holds on the current
-// speaker for 3 seconds after they go quiet before reverting to the grid.
-// Prevents the view snapping away mid-sentence during natural pauses.
-// ─────────────────────────────────────────────────────────────────────────
 const SPEAKING_THRESHOLD = 0.12, SPEAKING_DEBOUNCE = 2000, SILENCE_GRACE = 3000;
 
 function useActiveSpeaker(levelsRef) {
@@ -96,14 +83,6 @@ function SpeakerRing({ isActive, level = 0, thumbnail = false }) {
   );
 }
 
-// ── FIX 3: Network Warning Banner ────────────────────────────────────────
-// Shown when WebRTC peer connection state drops to disconnected/failed
-// OR when no audio activity is detected from any peer for 15+ seconds.
-// "How to fix this" expands an inline troubleshooting checklist.
-// "Open Network Settings" is best-effort — works on desktop and Android.
-// iOS does not support deep-linking to Settings so the checklist is the
-// primary fallback on that platform.
-// ─────────────────────────────────────────────────────────────────────────
 function NetworkWarningBanner({ onDismiss }) {
   const [expanded, setExpanded] = useState(false);
 
@@ -176,11 +155,9 @@ export default function MeetingRoom({ meetingId, user }) {
   const myChunksRef = useRef([]), chunkIntervalRef = useRef(null), chatBottomRef = useRef(null), fullscreenContainerRef = useRef(null);
   const myRecordingStartTimeRef = useRef(null), audioLevelsRef = useRef({});
 
-  // ── FIX 3: Network warning refs ───────────────────────────────────────────
   const [networkWarning, setNetworkWarning] = useState(false);
   const networkWarningTimerRef = useRef(null);
   const lastPeerActivityRef = useRef(Date.now());
-  // ─────────────────────────────────────────────────────────────────────────
 
   const [ringLevels, setRingLevels] = useState({});
   const activeSpeakerId = useActiveSpeaker(audioLevelsRef);
@@ -212,18 +189,10 @@ export default function MeetingRoom({ meetingId, user }) {
 
   const handleAudioLevel = useCallback((id, level) => {
     audioLevelsRef.current[id] = level;
-    // Track remote peer activity for network inactivity detection
     if (id !== myId && level > 0.02) lastPeerActivityRef.current = Date.now();
     setRingLevels(prev => { if (Math.abs((prev[id] || 0) - level) < 0.015) return prev; return { ...prev, [id]: level }; });
   }, [myId]);
 
-  // ── FIX 3: Inactivity-based network warning ───────────────────────────────
-  // Polls every 5s. If we have remote peers but no audio activity has been
-  // received from any of them for 15s, the stream is likely frozen due to
-  // slow WiFi (packets dropping but connection not fully severed).
-  // This catches degraded-but-not-disconnected scenarios that the WebRTC
-  // connectionstatechange handler alone would not catch.
-  // ─────────────────────────────────────────────────────────────────────────
   useEffect(() => {
     const interval = setInterval(() => {
       const hasPeers = Object.keys(peersRef.current).length > 0;
@@ -283,13 +252,37 @@ export default function MeetingRoom({ meetingId, user }) {
       const recorder = new MediaRecorder(audioOnly, { mimeType });
       myChunksRef.current = [];
       myRecordingStartTimeRef.current = Date.now();
-      recorder.ondataavailable = e => { if (e.data.size > 0) myChunksRef.current.push(e.data); };
+      let initSegment = null;
+      let isFirstChunk = true;
+      recorder.ondataavailable = e => {
+        if (e.data.size > 0) {
+          if (isFirstChunk) {
+            initSegment = e.data;
+            isFirstChunk = false;
+          }
+          myChunksRef.current.push(e.data);
+        }
+      };
       chunkIntervalRef.current = setInterval(() => {
         if (!myChunksRef.current.length) return;
-        const blob = new Blob([...myChunksRef.current], { type: mimeType }); myChunksRef.current = [];
-        blob.arrayBuffer().then(buf => { socketRef.current?.emit('audio-chunk', { meetingId, audioChunk: buf, timestamp: Date.now(), recordingStartTime: myRecordingStartTimeRef.current }); }).catch(e => console.warn('Chunk send failed:', e));
+        const chunks = [...myChunksRef.current];
+        myChunksRef.current = [];
+        const blobChunks = (initSegment && chunks[0] !== initSegment)
+          ? [initSegment, ...chunks]
+          : chunks;
+        const blob = new Blob(blobChunks, { type: mimeType });
+        blob.arrayBuffer().then(buf => {
+          socketRef.current?.emit('audio-chunk', {
+            meetingId,
+            audioChunk: buf,
+            timestamp: Date.now(),
+            recordingStartTime: myRecordingStartTimeRef.current
+          });
+        }).catch(e => console.warn('Chunk send failed:', e));
       }, 10000);
-      recorder.start(1000); myRecorderRef.current = recorder; setIsMyRecording(true);
+      recorder.start(1000);
+      myRecorderRef.current = recorder;
+      setIsMyRecording(true);
     } catch (e) { console.warn('Per-device recording failed:', e.message); }
   }, [meetingId]);
 
@@ -307,7 +300,6 @@ export default function MeetingRoom({ meetingId, user }) {
             timestamp: Date.now(),
             recordingStartTime: myRecordingStartTimeRef.current
           });
-          // Wait briefly so the emit completes before socket teardown
           await new Promise(r => setTimeout(r, 500));
         }
       } catch (_) { }
@@ -389,13 +381,6 @@ export default function MeetingRoom({ meetingId, user }) {
           setIsRecording(true); if (mounted && localStreamRef.current) startMyRecording(localStreamRef.current);
         });
 
-        // ── FIX 4: Rejoin mid-recording ────────────────────────────────────
-        // Server sends recording-status: true on join-room when recording is
-        // already in progress. Previously no listener existed so rejoining
-        // participants were silently excluded from the transcript. Now their
-        // recorder starts fresh with a new recordingStartTime and their audio
-        // is captured for the remainder of the meeting.
-        // ──────────────────────────────────────────────────────────────────
         socketRef.current.on('recording-status', (isCurrentlyRecording) => {
           if (!mounted) return;
           setIsRecording(isCurrentlyRecording);
@@ -424,7 +409,7 @@ export default function MeetingRoom({ meetingId, user }) {
 
   const createPeer = (userId, initiator, stream, incomingOffer = null) => {
     if (peersRef.current[userId]) { try { peersRef.current[userId].destroy(); } catch (_) { } delete peersRef.current[userId]; }
-    const peer = new SimplePeer({ initiator, trickle: true, stream, config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }, { urls: 'turn:autorack.proxy.rlwy.net:26677', username: 'catalyst', credential: 'catalyst123' }, { urls: 'turn:autorack.proxy.rlwy.net:26677?transport=tcp', username: 'catalyst', credential: 'catalyst123' }, { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' }] } });
+    const peer = new SimplePeer({ initiator, trickle: true, stream, config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }, { urls: 'turn:mainline.proxy.rlwy.net:10424', username: 'catalyst', credential: 'catalyst123' }, { urls: 'turn:mainline.proxy.rlwy.net:10424?transport=tcp', username: 'catalyst', credential: 'catalyst123' }, { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' }] } });
     peer.on('signal', data => { if (!socketRef.current) return; if (data.type === 'offer') socketRef.current.emit('offer', { meetingId, offer: data, targetUserId: userId }); else if (data.type === 'answer') socketRef.current.emit('answer', { meetingId, answer: data, targetUserId: userId }); else if (data.candidate) socketRef.current.emit('ice-candidate', { meetingId, candidate: data, targetUserId: userId }); });
     peer.on('stream', remoteStream => {
       setRemoteStreams(prev => ({ ...prev, [userId]: remoteStream }));
@@ -434,11 +419,6 @@ export default function MeetingRoom({ meetingId, user }) {
     peer.on('close', () => destroyPeer(userId));
     peer.on('error', err => { console.warn(`Peer error ${userId}:`, err.message); if (err.message.includes('Connection failed') && localStreamRef.current) { setTimeout(() => { socketRef.current?.emit('peer-restart', { meetingId, targetUserId: userId }); destroyPeer(userId); createPeer(userId, true, localStreamRef.current); }, 3000); } setRemoteStreams(prev => { const n = { ...prev }; delete n[userId]; return n; }); });
 
-    // ── FIX 3: WebRTC connection state monitoring ─────────────────────────
-    // connectionstatechange fires on hard failures like a router cutting out.
-    // disconnected/failed triggers the warning banner immediately.
-    // connected clears it — so if the connection recovers, the banner goes away.
-    // ──────────────────────────────────────────────────────────────────────
     if (peer._pc) {
       peer._pc.onconnectionstatechange = () => {
         const state = peer._pc?.connectionState;
@@ -523,16 +503,52 @@ export default function MeetingRoom({ meetingId, user }) {
       recordingChunksRef.current = [];
       recorder.ondataavailable = e => { if (e.data.size > 0) recordingChunksRef.current.push(e.data); };
       recorder.onstop = async () => {
-        const blob = new Blob(recordingChunksRef.current, { type: 'audio/webm' });
+        const chunks = [...recordingChunksRef.current];
+        recordingChunksRef.current = [];
+        const blob = new Blob(chunks, { type: 'audio/webm' });
+
         try {
-          toast.loading('Processing per-device audio...', { id: 'upload' });
-          const perDeviceAudio = await new Promise(resolve => { const timeout = setTimeout(() => resolve([]), 15000); socketRef.current?.once('transcript-queue', ({ perDeviceAudio: pda }) => { clearTimeout(timeout); resolve(pda || []); }); stopMyRecording(); socketRef.current?.emit('get-transcript-queue', { meetingId }); });
-          const fd = new FormData(); fd.append('recording', blob, 'meeting-recording.webm');
-          if (perDeviceAudio.length > 0) fd.append('perDeviceAudio', JSON.stringify(perDeviceAudio));
-          toast.loading('Uploading recording for AI processing...', { id: 'upload' });
-          await api.post(`/meetings/${meetingId}/upload-recording`, fd, { headers: { 'Content-Type': 'multipart/form-data' } });
-          toast.success(perDeviceAudio.length > 0 ? `Per-device audio from ${perDeviceAudio.length} participants — accurate speaker attribution!` : 'Mixed audio uploaded — AI will identify speakers.', { id: 'upload', duration: 5000 });
-        } catch (e) { toast.error('Failed to upload recording', { id: 'upload' }); }
+          toast.loading('Syncing per-device audio logs...', { id: 'upload' });
+
+          await stopMyRecording();
+
+          await new Promise(r => setTimeout(r, 1000));
+
+          const perDeviceAudio = await new Promise(resolve => {
+            const timeout = setTimeout(() => {
+              console.warn('Per-device audio sync timed out');
+              resolve([]);
+            }, 15000);
+
+            socketRef.current?.once('transcript-queue', ({ perDeviceAudio: pda }) => {
+              clearTimeout(timeout);
+              resolve(pda || []);
+            });
+
+            socketRef.current?.emit('get-transcript-queue', { meetingId });
+          });
+
+          const fd = new FormData();
+          fd.append('recording', blob, 'meeting-recording.webm');
+          if (perDeviceAudio.length > 0) {
+            fd.append('perDeviceAudio', JSON.stringify(perDeviceAudio));
+          }
+
+          toast.loading('Uploading and starting AI analysis...', { id: 'upload' });
+          await api.post(`/meetings/${meetingId}/upload-recording`, fd, {
+            headers: { 'Content-Type': 'multipart/form-data' }
+          });
+
+          toast.success(
+            perDeviceAudio.length > 0
+              ? `Done! Synced ${perDeviceAudio.length} speaker channels for accurate attribution.`
+              : 'Done! Processing mixed audio for AI analysis.',
+            { id: 'upload', duration: 6000 }
+          );
+        } catch (e) {
+          console.error('Upload failed:', e);
+          toast.error('Failed to upload recording. Please try manual upload in history.', { id: 'upload' });
+        }
       };
       recorder.start(1000); mediaRecorderRef.current = recorder;
       socketRef.current?.emit('start-recording', { meetingId }); setIsRecording(true); toast.success('Recording started');
@@ -617,7 +633,6 @@ export default function MeetingRoom({ meetingId, user }) {
 
       {isRecording && !isHost && (<div className="bg-red-900/30 border-b border-red-800/50 px-4 py-2 text-center text-sm text-red-300 shrink-0">🔴 This meeting is being recorded</div>)}
 
-      {/* FIX 3: Network warning banner — shown on degraded or failed connection */}
       {networkWarning && <NetworkWarningBanner onDismiss={() => setNetworkWarning(false)} />}
 
       <div className="flex-1 min-h-0 flex overflow-hidden">
@@ -638,12 +653,6 @@ export default function MeetingRoom({ meetingId, user }) {
             </div>
 
           ) : zoomedId ? (
-            // ── FIX 2: 70-30 split layout for zoomed speaker view ──────────
-            // Previously used flex-1 for speaker and h-28 fixed for attendees
-            // giving roughly 85-15 which made attendee tiles too small.
-            // Now uses flex-[7] and flex-[3] for a true 70-30 proportional
-            // split that scales correctly on all screen sizes.
-            // ──────────────────────────────────────────────────────────────
             <div className="flex flex-col gap-2 h-full">
               <div className="flex-[7] min-h-0">
                 {zoomedId === myId ? (

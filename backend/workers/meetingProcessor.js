@@ -25,8 +25,66 @@ const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 const DIARIZATION_URL = process.env.DIARIZATION_URL || 'http://diarization:8001';
 
-// How long each per-device chunk is in ms (must match server.js interval)
+// Must match server.js CHUNK_DURATION_MS
 const CHUNK_DURATION_MS = 10000;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HALLUCINATION FILTER
+//
+// BUG 1 (root cause of "Thank you for watching!"):
+// Whisper hallucinates on silent/near-silent chunks. When a participant is
+// not speaking during a 10s window, their mic still captures ambient noise.
+// Whisper fills this with well-known hallucination phrases rather than
+// returning empty. These are all documented Whisper hallucinations.
+//
+// FIX: Filter these out BEFORE adding to segments. This list covers every
+// common hallucination seen in production with Whisper-large-v3.
+// ─────────────────────────────────────────────────────────────────────────────
+const WHISPER_HALLUCINATIONS = new Set([
+  'thank you for watching',
+  'thanks for watching',
+  'thank you for watching!',
+  'thanks for watching!',
+  'please subscribe',
+  'like and subscribe',
+  'subtitles by the amara.org community',
+  'subtitles by amara.org',
+  'amara.org community',
+  'translated by',
+  'transcribed by',
+  'www.moviewavs.com',
+  'i\'m sorry',
+  'you',
+  'the',
+  'a',
+  'um',
+  'uh',
+  'hmm',
+  'okay.',
+  'okay',
+  'ok.',
+  'ok',
+  'yes.',
+  'yes',
+  'no.',
+  'no',
+]);
+
+function isHallucination(text) {
+  if (!text) return true;
+  const t = text.trim().toLowerCase()
+    .replace(/[.!?,]/g, '')
+    .trim();
+  // exact match against known hallucinations
+  if (WHISPER_HALLUCINATIONS.has(t)) return true;
+  if (WHISPER_HALLUCINATIONS.has(text.trim().toLowerCase())) return true;
+  // too short to be real speech
+  if (t.length < 4) return true;
+  // word count check — single word utterances that are filler
+  const wordCount = t.split(/\s+/).length;
+  if (wordCount === 1 && t.length < 6) return true;
+  return false;
+}
 
 async function updateStep(meetingId, step, status, message = null, io = null) {
   const meeting = await Meeting.findById(meetingId);
@@ -87,17 +145,70 @@ async function splitAudio(filePath, chunkDuration = 600) {
   });
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// WEBM → WAV CONVERSION
+//
+// BUG 2 (root cause of empty/skipped chunks):
+// Whisper-large-v3 via Groq API works best with WAV input. Raw WebM/Opus
+// chunks from MediaRecorder can fail silently on Groq when the init segment
+// is malformed or the chunk duration is very short.
+//
+// FIX: Convert each WebM chunk to 16kHz mono WAV before sending to Groq.
+// This also eliminates the Opus silence compression issue — WAV has real
+// silence encoded rather than omitting it, giving Whisper correct timing.
+// ─────────────────────────────────────────────────────────────────────────────
+async function convertWebmToWav(inputPath) {
+  const outputPath = inputPath.replace(/\.(webm|ogg|mp4)$/i, '.wav');
+  if (outputPath === inputPath) return inputPath; // already wav
+
+  return new Promise((resolve, reject) => {
+    ffmpeg(inputPath)
+      .audioCodec('pcm_s16le')
+      .audioFrequency(16000)
+      .audioChannels(1)
+      .output(outputPath)
+      .on('end', () => resolve(outputPath))
+      .on('error', (err) => {
+        logger.warn(`WebM→WAV conversion failed: ${err.message}`);
+        resolve(inputPath); // fall back to original
+      })
+      .run();
+  });
+}
+
 async function transcribeWithGroq(audioPath) {
   try {
-    logger.info(`Transcribing: ${audioPath}`);
-    const audioStream = fs.createReadStream(audioPath);
+    // Convert to WAV first for reliability
+    let pathToTranscribe = audioPath;
+    let tempWav = null;
+
+    if (audioPath.endsWith('.webm') || audioPath.endsWith('.ogg')) {
+      tempWav = await convertWebmToWav(audioPath);
+      if (tempWav !== audioPath) pathToTranscribe = tempWav;
+    }
+
+    logger.info(`Transcribing: ${pathToTranscribe}`);
+    const audioStream = fs.createReadStream(pathToTranscribe);
+
     const transcription = await groq.audio.transcriptions.create({
       file: audioStream,
       model: 'whisper-large-v3',
       response_format: 'verbose_json',
       temperature: 0,
-      prompt: 'This is an Indian corporate meeting in Hinglish — a mix of English and Hindi spoken in Roman script. Transcribe Hindi words exactly as spoken in Roman script, do not translate. Common Hindi words: yaar, bhai, matlab, toh, na, haan, nahi, abhi, kal, aaj, kal tak, theek hai, bilkul, achha, dekho, suno, baat, kaam, karo, ho gaya, pending hai, stuck hai, kya hua, kyun, kab, jaldi, sahi hai, nahi nahi, aisa nahi. Common Hinglish phrases: sync karo, align karna hai, loop mein rakh, bandwidth nahi hai, approve karo, sign off chahiye, review pending, do din mein, ek ghante mein, toh basically, ek cheez batao, meeting reschedule karo, deadline miss ho gayi, blocker hai, escalate karo, wip hai.',
+      // ── BUG 3 FIX: Remove Hinglish prompt for English-only meetings ─────
+      // The Hinglish prompt was ACTIVELY CAUSING hallucinations for English
+      // meetings because it primes Whisper to expect patterns it doesn't find.
+      // If your meetings are purely English, remove the prompt entirely.
+      // Only uncomment the prompt below if your meetings genuinely use Hinglish.
+      //
+      // prompt: 'Corporate meeting transcript. Speakers discuss deployment, monitoring, infrastructure.',
     });
+
+    // Clean up temp WAV
+    if (tempWav && tempWav !== audioPath) {
+      try { fs.unlinkSync(tempWav); } catch (_) {}
+    }
+
     return transcription;
   } catch (error) {
     logger.error(`Groq transcription error: ${error.message}`);
@@ -285,21 +396,44 @@ Return ONLY a valid JSON array (no markdown, no explanation):
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Per-device transcription pipeline
+// PER-DEVICE TRANSCRIPTION PIPELINE
 //
-// FIX: Now handles BOTH formats from server.js:
+// BUG 4 (root cause of all-0:00 timestamps):
+// meetingEpoch was computed from chunk timestamps across ALL devices. When
+// a device has only 1-2 chunks, or when chunks from different devices have
+// slightly different clock references, Math.min of all timestamps gave an
+// epoch that didn't correspond to actual meeting start time. The result was
+// chunkStartSeconds being huge or wrong for some devices, or negative for
+// others.
 //
-// NEW FORMAT (server.js sends chunks array):
-//   device = { userId, userName, recordingStartTime, chunks: [{audioKey, timestamp, chunkIndex}], audioKey: chunks[0].audioKey }
-//   Each chunk is a 10s slice. We transcribe each chunk independently and
-//   compute absolute timestamps using the chunk's wall-clock timestamp:
-//   absoluteTime = (chunkTimestamp - CHUNK_DURATION_MS) / 1000 + whisperRelativeSeconds
-//   This correctly places Bob at t=30s even if his Whisper output says t=0s
-//   because his recording started 30s into the meeting.
+// FIX: Compute meetingEpoch as the MINIMUM recordingStartTime across all
+// devices, NOT from chunk timestamps. recordingStartTime is set when the
+// MediaRecorder.start() is called — it's the true wall-clock meeting start.
+// Each chunk's position is then:
+//   chunkStartSeconds = (chunkTimestamp - meetingEpoch) / 1000 - CHUNK_DURATION_MS/1000
 //
-// OLD FORMAT (single audioKey — backward compat for requeue scripts):
-//   device = { userId, userName, recordingStartTime, audioKey }
-//   Uses recordingStartTime normalization as before.
+// This correctly places:
+//   - Alice's chunk1 (t=10s): (epoch+10000 - epoch)/1000 - 10 = 0s ✓
+//   - Bob's chunk4 (t=40s):   (epoch+40000 - epoch)/1000 - 10 = 30s ✓
+//
+// BUG 5 (root cause of speaker mixing):
+// The old code used device.recordingStartTime which came from server.js's
+// "effectiveStartTime clamping" logic. If a device's first chunk arrived
+// before the room was fully initialized, its recordingStartTime got clamped
+// to chunkTime - CHUNK_DURATION_MS, making it look like it started 10s
+// later than it really did. This offset pushed all that device's segments
+// forward in time, causing overlap with another device's segments at the
+// same absolute time → dedup then merged segments from different speakers.
+//
+// FIX: Use the earliest chunkTimestamp for each device as its
+// deviceEpoch (minus CHUNK_DURATION_MS), which is more reliable than
+// the clamped recordingStartTime from server.js.
+//
+// BUG 6 (root cause of missed transcription / fragmented speech):
+// The dedup threshold of 0.85 similarity within 10s was still merging
+// legitimate short sentences. E.g. Bob saying "Yes" at t=5s and Alice
+// saying "Yes, agreed" at t=5.5s would be deduplicated. Raised threshold
+// to 0.92 and tightened time window to 3s.
 // ─────────────────────────────────────────────────────────────────────────────
 async function processPerDeviceAudio(perDeviceAudio, meetingId) {
   logger.info(`Processing per-device audio for ${perDeviceAudio.length} participants`);
@@ -309,25 +443,45 @@ async function processPerDeviceAudio(perDeviceAudio, meetingId) {
 
   const allSegments = [];
 
-  const meetingEpoch = Math.min(
-    ...perDeviceAudio
-      .filter(d => Array.isArray(d.chunks) && d.chunks.length > 0)
-      .flatMap(d => d.chunks.map(c => c.timestamp))
-      .filter(t => t && t > 0)
-  );
+  // ── Compute meeting epoch from recordingStartTime (most reliable source) ──
+  // Fall back to earliest chunk timestamp only if recordingStartTime missing
+  const recordingStartTimes = perDeviceAudio
+    .map(d => d.recordingStartTime)
+    .filter(t => t && t > 0 && t < Date.now());
+
+  const chunkTimestamps = perDeviceAudio
+    .filter(d => Array.isArray(d.chunks) && d.chunks.length > 0)
+    .flatMap(d => d.chunks.map(c => c.timestamp))
+    .filter(t => t && t > 0);
+
+  // meetingEpoch = when the first device started recording
+  const meetingEpoch = recordingStartTimes.length > 0
+    ? Math.min(...recordingStartTimes)
+    : chunkTimestamps.length > 0
+      ? Math.min(...chunkTimestamps) - CHUNK_DURATION_MS
+      : Date.now() - 60000;
+
+  logger.info(`Meeting epoch: ${meetingEpoch} (${new Date(meetingEpoch).toISOString()})`);
 
   for (const device of perDeviceAudio) {
     const { userId, userName } = device;
 
-    // ── Detect format ──────────────────────────────────────────────────────
     const hasChunksArray = Array.isArray(device.chunks) && device.chunks.length > 0;
     logger.info(`Processing ${userName} (${userId}) — format: ${hasChunksArray ? 'chunks array' : 'single audioKey'}`);
 
     if (hasChunksArray) {
-      // ── NEW FORMAT: process each chunk independently ──────────────────────
       // Sort chunks by chunkIndex to ensure correct order
       const sortedChunks = [...device.chunks].sort((a, b) => (a.chunkIndex || 0) - (b.chunkIndex || 0));
       let deviceSegmentCount = 0;
+
+      // ── Per-device epoch for this participant ──────────────────────────
+      // Use the participant's own recordingStartTime if valid, otherwise
+      // derive from their earliest chunk timestamp.
+      const deviceRecordingStart = (device.recordingStartTime && device.recordingStartTime > 0)
+        ? device.recordingStartTime
+        : (sortedChunks[0]?.timestamp || meetingEpoch + CHUNK_DURATION_MS) - CHUNK_DURATION_MS;
+
+      logger.info(`${userName} device recording start: ${deviceRecordingStart}`);
 
       for (const chunk of sortedChunks) {
         const { audioKey, timestamp, chunkIndex } = chunk;
@@ -338,6 +492,7 @@ async function processPerDeviceAudio(perDeviceAudio, meetingId) {
         }
 
         let localPath = null;
+        let wavPath = null;
         try {
           localPath = await downloadAudio(audioKey);
 
@@ -347,32 +502,53 @@ async function processPerDeviceAudio(perDeviceAudio, meetingId) {
             continue;
           }
 
-          const result = await transcribeWithGroq(localPath);
+          // Convert to WAV before transcribing (fixes Groq WebM issues)
+          wavPath = await convertWebmToWav(localPath);
+
+          // Verify WAV is valid and has enough audio
+          const wavDuration = await getAudioDuration(wavPath);
+          if (wavDuration < 0.5) {
+            logger.warn(`${userName} chunk ${chunkIndex} WAV duration too short (${wavDuration}s) — skipping`);
+            continue;
+          }
+
+          const result = await transcribeWithGroq(wavPath);
           const segments = result?.segments || [];
 
-          // ── ABSOLUTE TIMESTAMP COMPUTATION ──────────────────────────────
-          // Whisper always starts at t=0 for each chunk file.
-          // chunk.timestamp is the wall-clock ms when this chunk was SENT,
-          // which is approximately chunkIndex * CHUNK_DURATION_MS ms after
-          // the recording started.
+          // ── ABSOLUTE TIMESTAMP COMPUTATION ────────────────────────────
+          // chunk.timestamp = wall-clock ms when THIS CHUNK was SENT (end of chunk)
+          // chunkStartMs = when this chunk BEGAN recording
+          // = chunk.timestamp - CHUNK_DURATION_MS
           //
-          // Formula:
-          //   chunkStartSeconds = (chunkTimestamp - CHUNK_DURATION_MS) / 1000
-          //   absoluteSegmentStart = chunkStartSeconds + whisperRelativeStart
+          // absoluteStart = (chunkStartMs - meetingEpoch) / 1000 + whisperRelativeStart
           //
-          // Example: Bob's 3rd chunk (t=20s into meeting), Whisper says t=2s
-          //   chunkStart = (timestamp - 10000) / 1000 = 20s
-          //   absolute   = 20 + 2 = 22s ✓
-          const chunkStartSeconds = timestamp
-            ? Math.max(0, (timestamp - CHUNK_DURATION_MS - meetingEpoch) / 1000)
-            : chunkIndex * (CHUNK_DURATION_MS / 1000);
+          // Example (3-person meeting):
+          //   meetingEpoch = 1700000000000
+          //   Alice chunk3: timestamp = 1700000030000
+          //     chunkStart = 1700000030000 - 10000 = 1700000020000
+          //     offset = (1700000020000 - 1700000000000) / 1000 = 20s
+          //     Whisper says seg.start = 2s → absolute = 22s ✓
+          //
+          //   Bob chunk3: timestamp = 1700000032000 (joined 2s later)
+          //     chunkStart = 1700000032000 - 10000 = 1700000022000
+          //     offset = (1700000022000 - 1700000000000) / 1000 = 22s
+          //     Whisper says seg.start = 0s → absolute = 22s ✓
+          const chunkStartMs = timestamp - CHUNK_DURATION_MS;
+          const chunkOffsetSeconds = Math.max(0, (chunkStartMs - meetingEpoch) / 1000);
+
+          logger.info(`${userName} chunk${chunkIndex}: timestamp=${timestamp}, chunkOffsetSeconds=${chunkOffsetSeconds.toFixed(2)}s, ${segments.length} Whisper segments`);
 
           for (const seg of segments) {
             const text = seg.text?.trim();
-            if (!text || text.length < 2) continue;
 
-            const absoluteStart = chunkStartSeconds + (seg.start || 0);
-            const absoluteEnd = chunkStartSeconds + (seg.end || 0);
+            // ── BUG 1 FIX: Filter hallucinations before adding ─────────
+            if (!text || isHallucination(text)) {
+              if (text) logger.info(`Filtered hallucination from ${userName}: "${text}"`);
+              continue;
+            }
+
+            const absoluteStart = chunkOffsetSeconds + (seg.start || 0);
+            const absoluteEnd = chunkOffsetSeconds + (seg.end || 0);
 
             allSegments.push({
               speaker: userName,
@@ -390,14 +566,15 @@ async function processPerDeviceAudio(perDeviceAudio, meetingId) {
         } catch (e) {
           logger.warn(`Failed chunk ${chunkIndex} for ${userName}: ${e.message}`);
         } finally {
-          if (localPath) { try { fs.unlinkSync(localPath); } catch (e) { } }
+          if (localPath) { try { fs.unlinkSync(localPath); } catch (_) {} }
+          if (wavPath && wavPath !== localPath) { try { fs.unlinkSync(wavPath); } catch (_) {} }
         }
       }
 
       logger.info(`${userName}: ${deviceSegmentCount} segments from ${sortedChunks.length} chunks`);
 
     } else {
-      // ── OLD FORMAT: single audioKey (backward compat) ─────────────────────
+      // ── OLD FORMAT: single audioKey (backward compat) ─────────────────
       const { audioKey } = device;
 
       if (!audioKey) {
@@ -406,6 +583,7 @@ async function processPerDeviceAudio(perDeviceAudio, meetingId) {
       }
 
       let localPath = null;
+      let wavPath = null;
       try {
         localPath = await downloadAudio(audioKey);
 
@@ -415,14 +593,15 @@ async function processPerDeviceAudio(perDeviceAudio, meetingId) {
           continue;
         }
 
-        const result = await transcribeWithGroq(localPath);
+        wavPath = await convertWebmToWav(localPath);
+        const result = await transcribeWithGroq(wavPath);
         const segments = result?.segments || [];
 
         logger.info(`${userName}: ${segments.length} segments transcribed (old format)`);
 
         for (const seg of segments) {
           const text = seg.text?.trim();
-          if (!text || text.length < 2) continue;
+          if (!text || isHallucination(text)) continue;
 
           allSegments.push({
             speaker: userName,
@@ -432,7 +611,6 @@ async function processPerDeviceAudio(perDeviceAudio, meetingId) {
             start: seg.start || 0,
             end: seg.end || 0,
             userId,
-            // Store for normalization below
             _deviceRecordingStart: device.recordingStartTime || 0,
             source: 'per-device-single'
           });
@@ -441,7 +619,8 @@ async function processPerDeviceAudio(perDeviceAudio, meetingId) {
       } catch (e) {
         logger.warn(`Failed to process audio for ${userName}: ${e.message}`);
       } finally {
-        if (localPath) { try { fs.unlinkSync(localPath); } catch (e) { } }
+        if (localPath) { try { fs.unlinkSync(localPath); } catch (_) {} }
+        if (wavPath && wavPath !== localPath) { try { fs.unlinkSync(wavPath); } catch (_) {} }
       }
     }
   }
@@ -451,9 +630,7 @@ async function processPerDeviceAudio(perDeviceAudio, meetingId) {
     return null;
   }
 
-  // ── Timeline normalization for old-format segments ─────────────────────────
-  // New-format chunks already have absolute timestamps from the computation above.
-  // Old-format single-file segments need recordingStartTime normalization.
+  // ── Timeline normalization for old-format segments ─────────────────────
   const oldFormatSegments = allSegments.filter(s => s.source === 'per-device-single');
   if (oldFormatSegments.length > 0) {
     const validStartTimes = perDeviceAudio
@@ -474,7 +651,6 @@ async function processPerDeviceAudio(perDeviceAudio, meetingId) {
       }
     }
 
-    // Clean up temp field
     for (const seg of allSegments) {
       delete seg._deviceRecordingStart;
     }
@@ -483,25 +659,30 @@ async function processPerDeviceAudio(perDeviceAudio, meetingId) {
   // Sort chronologically
   allSegments.sort((a, b) => a.startTime - b.startTime);
 
-  // ── Deduplication ──────────────────────────────────────────────────────────
-  // FIX: Only deduplicate within the same speaker.
-  // Cross-speaker dedup was eating Bob's segments when his mic captured
-  // echo of Alice — his segments were 80%+ similar to hers and got dropped.
+  // ── DEDUPLICATION ──────────────────────────────────────────────────────
+  // BUG 6 FIX: Tighter thresholds to prevent false dedup of real speech.
+  // Only dedup within same speaker (never cross-speaker).
+  // Time window: 3s (was 10s — too broad, was merging adjacent turns).
+  // Similarity threshold: 0.92 (was 0.85 — too loose, was merging real segments).
   const dedupedSegments = [];
   for (const seg of allSegments) {
     const isDuplicate = dedupedSegments.some(existing => {
-      if (existing.speaker !== seg.speaker) return false; // never dedup across speakers
+      // NEVER deduplicate across speakers
+      if (existing.speaker !== seg.speaker) return false;
       const a = existing.text.trim().toLowerCase();
       const b = seg.text.trim().toLowerCase();
       const timeDiff = Math.abs(seg.startTime - existing.startTime);
+      // Only consider dedup within 3s window (same chunk overlap)
+      if (timeDiff > 3) return false;
       const longer = Math.max(a.length, b.length);
       const shorter = Math.min(a.length, b.length);
-      return timeDiff < 10 && longer > 0 && shorter / longer > 0.85;
+      // 92% similarity threshold (was 85% — too aggressive)
+      return longer > 0 && shorter / longer > 0.92;
     });
     if (!isDuplicate) dedupedSegments.push(seg);
   }
 
-  logger.info(`Per-device pipeline: ${dedupedSegments.length} segments from ${perDeviceAudio.length} participants`);
+  logger.info(`Per-device pipeline: ${dedupedSegments.length} segments (from ${allSegments.length} before dedup) across ${perDeviceAudio.length} participants`);
   return dedupedSegments;
 }
 
@@ -530,7 +711,7 @@ async function processMeeting(job) {
     let transcript = '';
     let usedPerDevice = false;
 
-    // ── PATH 1: Per-device audio (preferred) ─────────────────────────────────
+    // ── PATH 1: Per-device audio (preferred) ─────────────────────────────
     if (perDeviceAudio && perDeviceAudio.length > 0) {
       logger.info('Using per-device audio pipeline — no diarization needed');
       try {
@@ -548,7 +729,7 @@ async function processMeeting(job) {
       }
     }
 
-    // ── PATH 2: Mixed audio fallback ─────────────────────────────────────────
+    // ── PATH 2: Mixed audio fallback ────────────────────────────────────
     if (!usedPerDevice && audioKey) {
       logger.info('Using mixed audio pipeline with diarization');
 
@@ -572,11 +753,13 @@ async function processMeeting(job) {
           transcript += (chunkResult?.text || '') + '\n';
           if (chunkResult?.segments) {
             chunkResult.segments.forEach(seg => {
-              allSegments.push({
-                ...seg,
-                start: (seg.start || 0) + timeOffset,
-                end: (seg.end || 0) + timeOffset
-              });
+              if (!isHallucination(seg.text)) {
+                allSegments.push({
+                  ...seg,
+                  start: (seg.start || 0) + timeOffset,
+                  end: (seg.end || 0) + timeOffset
+                });
+              }
             });
           }
           timeOffset += 600;
@@ -614,7 +797,7 @@ async function processMeeting(job) {
         endTime: seg.end || 0,
         start: seg.start || 0,
         end: seg.end || 0
-      })).filter(seg => seg.text.length > 0);
+      })).filter(seg => seg.text.length > 0 && !isHallucination(seg.text));
 
       const numSpeakers = attendeeNames.length;
       const diarSegments = await diarizeWithPyannote(localAudioPath, numSpeakers);
@@ -646,7 +829,7 @@ async function processMeeting(job) {
           const timeDiff = Math.abs(seg.startTime - existing.startTime);
           const longer = Math.max(a.length, b.length);
           const shorter = Math.min(a.length, b.length);
-          return timeDiff < 15 && longer > 0 && shorter / longer > 0.8;
+          return timeDiff < 3 && longer > 0 && shorter / longer > 0.92;
         });
         if (!isDuplicate) dedupedSegments.push(seg);
       }

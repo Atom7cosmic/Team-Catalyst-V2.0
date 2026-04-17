@@ -257,7 +257,7 @@ export default function RecommendationCard({ recommendation, showActions = true,
                     </p>
                     {recommendation.acknowledgeReason && (
                       <p className="text-xs text-slate-400 mt-1 italic">
-                        "{recommendation.acknowledgeReason}"
+                        &quot;{recommendation.acknowledgeReason}&quot;
                       </p>
                     )}
                   </div>
@@ -281,7 +281,7 @@ export default function RecommendationCard({ recommendation, showActions = true,
                     </p>
                     {recommendation.dismissedReason && (
                       <p className="text-xs text-slate-400 mt-1 italic">
-                        "{recommendation.dismissedReason}"
+                        &quot;{recommendation.dismissedReason}&quot;
                       </p>
                     )}
                   </div>
