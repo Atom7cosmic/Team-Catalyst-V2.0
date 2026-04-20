@@ -129,23 +129,23 @@ app.get('/health', (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // Per-device transcript queue
 //
-// FIX: Per-chunk timestamp approach for accurate timeline positioning.
+// Each participant's audio chunks are stored in-memory keyed by meetingId.
+// When the meeting ends:
+//   1. Every participant (host + non-hosts) emits flush-my-chunks, which
+//      uploads their chunks to S3 immediately and marks them as ready.
+//   2. The host emits get-transcript-queue after all participants have
+//      flushed, receiving the combined perDeviceAudio array for all speakers.
+//   3. The host POSTs the mixed recording + perDeviceAudio to upload-recording.
 //
-// ROOT CAUSE OF OVERLAPPING SEGMENTS:
-// WebM/Opus audio chunks concatenated as raw ArrayBuffers lose inter-chunk
-// silence. When Bob is silent for 30s while Alice speaks, those 30s are
-// compressed away in the concatenated file. Whisper then assigns Bob's first
-// word t=0 instead of t=30s, causing all of Bob's segments to appear at the
-// wrong time on the shared timeline.
-//
-// THE FIX:
-// Instead of concatenating all chunks into one blob per user, we upload each
-// chunk as a SEPARATE file and store its wall-clock send timestamp alongside it.
-// The worker transcribes each chunk independently and computes:
-//   absoluteTime = (chunkTimestamp - CHUNK_DURATION) + whisperRelativeTime
-// This gives correct absolute positioning regardless of Opus silence compression.
+// This eliminates the race condition where non-host chunks were never uploaded
+// because get-transcript-queue was only called by the host, and non-host
+// chunks sat in memory without ever reaching S3.
 // ─────────────────────────────────────────────────────────────────────────────
 const transcriptQueue = new Map();
+
+// Tracks per-meeting which userIds have completed their S3 flush.
+// Structure: Map<meetingId, Map<userId, { userName, recordingStartTime, chunks: [{audioKey, timestamp, chunkIndex}] }>>
+const flushedDeviceAudio = new Map();
 
 const roomParticipants = new Map();
 
@@ -279,9 +279,11 @@ io.on('connection', (socket) => {
   });
 
   // ── Per-device audio chunk ────────────────────────────────────────────────
-  // FIX: Store each chunk with its own timestamp (wall clock when sent).
-  // This is the key data needed by the worker to compute accurate absolute
-  // segment times. Each chunk covers [timestamp - CHUNK_DURATION_MS, timestamp].
+  // Store each chunk with its own wall-clock timestamp.
+  // BUG 5 FIX: Do NOT clamp recordingStartTime. Trust the value from the
+  // client — it is set at MediaRecorder.start() time. Clamping caused late
+  // joiners' recordingStartTime to be shifted forward, placing their segments
+  // at the wrong position on the shared timeline and causing speaker mixing.
   socket.on('audio-chunk', ({ meetingId, audioChunk, timestamp, recordingStartTime }) => {
     if (!transcriptQueue.has(meetingId)) {
       transcriptQueue.set(meetingId, []);
@@ -292,25 +294,11 @@ io.on('connection', (socket) => {
     const now = Date.now();
     const chunkTime = timestamp || now;
 
-    // BUG 5 FIX: Do NOT clamp recordingStartTime.
-    //
-    // The old clamp (effectiveStartTime < chunkTime - 15000 → clamp to chunkTime - 10s)
-    // was designed to reject "stale" start times, but it fires for any participant
-    // who joined more than 15s after the meeting started (e.g. Bob joins at t=20s).
-    // The clamp shifts Bob's recordingStartTime FORWARD to chunkTime - 10s, making
-    // him look like he started 10s into the meeting instead of 20s. This places Bob's
-    // segments 10s too early on the shared timeline, causing overlap with Alice's
-    // segments at the same timestamps. The dedup pass then merges them under the
-    // wrong speaker.
-    //
-    // The correct approach: trust recordingStartTime from the client. It is set at
-    // MediaRecorder.start() — the true wall-clock start for that device. If it is
-    // missing (old client), fall back to chunkTime only. No clamping.
     const effectiveStartTime = (recordingStartTime && recordingStartTime > 0)
       ? recordingStartTime
       : chunkTime;
 
-    // Sanity log only — no mutation of the value
+    // Sanity log only — no mutation
     const offsetSeconds = Math.round((chunkTime - effectiveStartTime) / 1000);
     if (offsetSeconds > 300) {
       logger.warn(`${displayName} recordingStartTime is ${offsetSeconds}s before chunkTime — keeping as-is (late joiner or clock skew)`);
@@ -327,76 +315,132 @@ io.on('connection', (socket) => {
     logger.info(`Audio chunk queued for ${displayName} in meeting ${meetingId}, chunkTime: ${chunkTime}, queue size: ${queue.length}`);
   });
 
-  // ── Host requests per-device audio upload when meeting ends ──────────────
-  // FIX: Upload each chunk as a SEPARATE file with its timestamp in the key.
-  // The worker will transcribe each chunk independently and use the chunk's
-  // timestamp to compute the true wall-clock position of each Whisper segment.
-  // This eliminates the WebM silence compression issue that caused overlapping.
-  socket.on('get-transcript-queue', async ({ meetingId }) => {
+  // ── Per-participant chunk flush ───────────────────────────────────────────
+  // FIX: Every participant (host AND non-hosts) emits this when the meeting
+  // ends. It uploads only THIS participant's chunks to S3 immediately, then
+  // stores the result in flushedDeviceAudio for the host to collect later.
+  //
+  // This solves the bug where non-host chunks were never uploaded because
+  // get-transcript-queue was only emitted by the host after recorder.onstop,
+  // which only ran on the host's device.
+  socket.on('flush-my-chunks', async ({ meetingId }) => {
     const queue = transcriptQueue.get(meetingId) || [];
-    if (queue.length === 0) {
-      socket.emit('transcript-queue', { meetingId, perDeviceAudio: [] });
+    const myChunks = queue.filter(c => c.userId === socket.userId);
+    const displayName = getDisplayName();
+
+    if (myChunks.length === 0) {
+      logger.info(`flush-my-chunks: no chunks for ${displayName} in ${meetingId}`);
+      socket.emit('my-chunks-flushed', { meetingId, success: true, chunkCount: 0 });
       return;
     }
 
-    // Group chunks by userId — preserve individual chunk timestamps
-    const byUser = {};
-    for (const chunk of queue) {
-      if (!byUser[chunk.userId]) {
-        byUser[chunk.userId] = {
-          userId: chunk.userId,
-          userName: chunk.userName,
-          chunks: [],
-          recordingStartTime: chunk.recordingStartTime,
-        };
-      }
-      byUser[chunk.userId].chunks.push({
-        audioBuffer: chunk.audioBuffer,
-        timestamp: chunk.timestamp,
-        recordingStartTime: chunk.recordingStartTime,
-      });
-      // Keep earliest recordingStartTime
-      if (chunk.recordingStartTime < byUser[chunk.userId].recordingStartTime) {
-        byUser[chunk.userId].recordingStartTime = chunk.recordingStartTime;
-      }
+    // Ensure flushedDeviceAudio map exists for this meeting
+    if (!flushedDeviceAudio.has(meetingId)) {
+      flushedDeviceAudio.set(meetingId, new Map());
     }
+    const meetingFlushed = flushedDeviceAudio.get(meetingId);
 
-    logger.info(`Uploading per-device audio for ${Object.keys(byUser).length} participants`);
+    try {
+      const uploadedChunks = [];
+      let earliestStartTime = myChunks[0].recordingStartTime;
 
-    const perDeviceAudio = [];
-
-    for (const [userId, data] of Object.entries(byUser)) {
-      try {
-        // Upload each chunk as a separate file
-        const uploadedChunks = [];
-        for (let i = 0; i < data.chunks.length; i++) {
-          const chunk = data.chunks[i];
-          const audioKey = `meetings/${meetingId}/device-${userId}-chunk${i}-${chunk.timestamp}.webm`;
-          await uploadFile(audioKey, chunk.audioBuffer, 'audio/webm');
-          uploadedChunks.push({
-            audioKey,
-            timestamp: chunk.timestamp,        // wall clock when this chunk was sent
-            chunkIndex: i,
-          });
+      for (let i = 0; i < myChunks.length; i++) {
+        const chunk = myChunks[i];
+        if (chunk.recordingStartTime < earliestStartTime) {
+          earliestStartTime = chunk.recordingStartTime;
         }
-
-        perDeviceAudio.push({
-          userId,
-          userName: data.userName,
-          recordingStartTime: data.recordingStartTime,
-          chunks: uploadedChunks,              // array of { audioKey, timestamp, chunkIndex }
-          // Legacy field for backward compat — use first chunk's key
-          audioKey: uploadedChunks[0]?.audioKey,
+        const audioKey = `meetings/${meetingId}/device-${socket.userId}-chunk${i}-${chunk.timestamp}.webm`;
+        await uploadFile(audioKey, chunk.audioBuffer, 'audio/webm');
+        uploadedChunks.push({
+          audioKey,
+          timestamp: chunk.timestamp,
+          chunkIndex: i,
         });
-
-        logger.info(`Uploaded ${uploadedChunks.length} chunks for ${data.userName}, startTime: ${data.recordingStartTime}`);
-      } catch (e) {
-        logger.warn(`Failed to upload audio for ${data.userName}: ${e.message}`);
       }
+
+      meetingFlushed.set(socket.userId, {
+        userId: socket.userId,
+        userName: displayName,
+        recordingStartTime: earliestStartTime,
+        chunks: uploadedChunks,
+        audioKey: uploadedChunks[0]?.audioKey, // legacy compat
+      });
+
+      logger.info(`flush-my-chunks: uploaded ${uploadedChunks.length} chunks for ${displayName} in ${meetingId}`);
+      socket.emit('my-chunks-flushed', { meetingId, success: true, chunkCount: uploadedChunks.length });
+    } catch (e) {
+      logger.warn(`flush-my-chunks failed for ${displayName}: ${e.message}`);
+      socket.emit('my-chunks-flushed', { meetingId, success: false, chunkCount: 0 });
+    }
+  });
+
+  // ── Host requests combined per-device audio after all participants flush ──
+  // Called only by the host, after all participants have emitted flush-my-chunks.
+  // Returns the combined flushedDeviceAudio for all speakers in this meeting.
+  socket.on('get-transcript-queue', async ({ meetingId }) => {
+    const meetingFlushed = flushedDeviceAudio.get(meetingId);
+
+    if (!meetingFlushed || meetingFlushed.size === 0) {
+      // Fallback: old path — upload from in-memory queue directly (no flush was done)
+      const queue = transcriptQueue.get(meetingId) || [];
+      if (queue.length === 0) {
+        socket.emit('transcript-queue', { meetingId, perDeviceAudio: [] });
+        return;
+      }
+
+      const byUser = {};
+      for (const chunk of queue) {
+        if (!byUser[chunk.userId]) {
+          byUser[chunk.userId] = {
+            userId: chunk.userId,
+            userName: chunk.userName,
+            chunks: [],
+            recordingStartTime: chunk.recordingStartTime,
+          };
+        }
+        byUser[chunk.userId].chunks.push({
+          audioBuffer: chunk.audioBuffer,
+          timestamp: chunk.timestamp,
+          recordingStartTime: chunk.recordingStartTime,
+        });
+        if (chunk.recordingStartTime < byUser[chunk.userId].recordingStartTime) {
+          byUser[chunk.userId].recordingStartTime = chunk.recordingStartTime;
+        }
+      }
+
+      logger.info(`get-transcript-queue (fallback path): uploading for ${Object.keys(byUser).length} participants`);
+      const perDeviceAudio = [];
+
+      for (const [userId, data] of Object.entries(byUser)) {
+        try {
+          const uploadedChunks = [];
+          for (let i = 0; i < data.chunks.length; i++) {
+            const chunk = data.chunks[i];
+            const audioKey = `meetings/${meetingId}/device-${userId}-chunk${i}-${chunk.timestamp}.webm`;
+            await uploadFile(audioKey, chunk.audioBuffer, 'audio/webm');
+            uploadedChunks.push({ audioKey, timestamp: chunk.timestamp, chunkIndex: i });
+          }
+          perDeviceAudio.push({
+            userId,
+            userName: data.userName,
+            recordingStartTime: data.recordingStartTime,
+            chunks: uploadedChunks,
+            audioKey: uploadedChunks[0]?.audioKey,
+          });
+          logger.info(`Fallback uploaded ${uploadedChunks.length} chunks for ${data.userName}`);
+        } catch (e) {
+          logger.warn(`Fallback upload failed for ${data.userName}: ${e.message}`);
+        }
+      }
+
+      socket.emit('transcript-queue', { meetingId, perDeviceAudio });
+      return;
     }
 
+    // Normal path — all participants have flushed, return combined result
+    const perDeviceAudio = Array.from(meetingFlushed.values());
+    logger.info(`get-transcript-queue: returning ${perDeviceAudio.length} flushed participants for meeting ${meetingId}`);
     socket.emit('transcript-queue', { meetingId, perDeviceAudio });
-    logger.info(`Per-device audio upload complete: ${perDeviceAudio.length} participants`);
   });
 
   socket.on('raise-hand', ({ meetingId }) => {
@@ -420,6 +464,7 @@ io.on('connection', (socket) => {
     if (room) {
       room.recording = true;
       transcriptQueue.set(meetingId, []);
+      flushedDeviceAudio.delete(meetingId); // clear any stale flush state from previous recording
       io.to(meetingId).emit('recording-started');
     }
   });
@@ -464,6 +509,7 @@ io.on('connection', (socket) => {
           setTimeout(() => {
             if (!rooms.has(meetingId)) {
               transcriptQueue.delete(meetingId);
+              flushedDeviceAudio.delete(meetingId);
               roomParticipants.delete(meetingId);
             }
           }, 30 * 60 * 1000);
