@@ -191,24 +191,12 @@ exports.uploadRecording = async (req, res) => {
 
     meeting.recordingUrl = key;
     meeting.recordingSource = 'room';
-    meeting.status = 'processing';
+    meeting.status = 'completed';
     meeting.processingSteps.forEach(step => { if (step.step === 'upload') { step.status = 'done'; step.timestamp = new Date(); } });
     if (perDeviceAudio && perDeviceAudio.length > 0) meeting.perDeviceAudioKeys = perDeviceAudio;
     await meeting.save();
 
-    let jobId = null;
-    if (meetingQueue) {
-      const jobData = {
-        meetingId: id,
-        audioKey: key,
-        ...(perDeviceAudio && perDeviceAudio.length > 0 ? { perDeviceAudio } : {})
-      };
-      const job = await meetingQueue.add('process-meeting', jobData, { attempts: 3, backoff: { type: 'exponential', delay: 5000 } });
-      jobId = job.id;
-      logger.info(`Job ${jobId} queued for meeting ${id}`);
-    }
-
-    res.json({ success: true, message: 'Recording uploaded and queued for processing', meeting, jobId });
+    res.json({ success: true, message: 'Recording saved. Click "Analyze Meeting" to start AI processing.', meeting });
   } catch (error) {
     logger.error(`Upload recording error: ${error.message}`);
     res.status(500).json({ success: false, message: 'Failed to upload recording' });

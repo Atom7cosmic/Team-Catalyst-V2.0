@@ -539,15 +539,13 @@ export default function MeetingRoom({ meetingId, user }) {
             fd.append('perDeviceAudio', JSON.stringify(perDeviceAudio));
           }
 
-          toast.loading('Uploading and starting AI analysis...', { id: 'upload' });
+          toast.loading('Uploading recording...', { id: 'upload' });
           await api.post(`/meetings/${meetingId}/upload-recording`, fd, {
             headers: { 'Content-Type': 'multipart/form-data' }
           });
 
           toast.success(
-            perDeviceAudio.length > 0
-              ? `Done! Synced ${perDeviceAudio.length} speaker channels for accurate attribution.`
-              : 'Done! Processing mixed audio for AI analysis.',
+            'Recording saved! Go to the meeting page and click "Analyze Meeting" when ready.',
             { id: 'upload', duration: 6000 }
           );
         } catch (e) {
@@ -569,8 +567,18 @@ export default function MeetingRoom({ meetingId, user }) {
     try {
       await api.post(`/meetings/${meetingId}/end`);
       if (isRecording && mediaRecorderRef.current?.state !== 'inactive') {
-        toast.loading('Saving recording...', { id: 'end-meeting' }); mediaRecorderRef.current.stop(); socketRef.current?.emit('stop-recording', { meetingId }); setIsRecording(false);
-        await new Promise(r => setTimeout(r, 8000)); toast.dismiss('end-meeting');
+        toast.loading('Saving recording...', { id: 'end-meeting' });
+        await new Promise((resolve) => {
+          const originalOnStop = mediaRecorderRef.current.onstop;
+          mediaRecorderRef.current.onstop = async (e) => {
+            try { if (originalOnStop) await originalOnStop.call(mediaRecorderRef.current, e); } catch (_) { }
+            finally { resolve(); }
+          };
+          mediaRecorderRef.current.stop();
+          socketRef.current?.emit('stop-recording', { meetingId });
+          setIsRecording(false);
+        });
+        toast.dismiss('end-meeting');
       } else { stopMyRecording(); }
       toast.success('Meeting ended'); cleanup(); router.push(`/meetings/${meetingId}`);
     } catch (e) { toast.error(e?.response?.data?.message || 'Failed to end meeting'); setIsEndingMeeting(false); }
