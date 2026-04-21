@@ -33,6 +33,7 @@ services:
       - REDIS_URL=${REDIS_URL:-redis://redis:6379}
       - CHROMA_HOST=${CHROMA_HOST:-chroma}
       - CHROMA_PORT=${CHROMA_PORT:-8000}
+      - DIARIZATION_URL=http://diarization:8001
     volumes:
       - ./backend:/app
       - /app/node_modules
@@ -41,8 +42,28 @@ services:
     depends_on:
       - redis
       - chroma
+      - diarization
     networks:
       - orgos-network
+
+  diarization:
+    build:
+      context: ./diarization
+      dockerfile: Dockerfile
+    ports:
+      - "8001:8001"
+    env_file:
+      - .env
+    environment:
+      - HF_TOKEN=${HF_TOKEN}
+    volumes:
+      - huggingface-cache:/root/.cache/huggingface
+    networks:
+      - orgos-network
+    # Pyannote pipeline takes ~60s to load on first start.
+    # Backend will retry diarization gracefully and fall back
+    # to LLM if the service isn't ready yet.
+    restart: unless-stopped
 
   redis:
     image: redis:7-alpine
@@ -70,6 +91,10 @@ volumes:
   redis_data:
   chroma_data:
   whisper-cache:
+  # Persists downloaded HuggingFace model weights across container restarts.
+  # Without this, pyannote re-downloads ~1GB of models every time the
+  # diarization container is rebuilt or restarted.
+  huggingface-cache:
 
 networks:
   orgos-network:

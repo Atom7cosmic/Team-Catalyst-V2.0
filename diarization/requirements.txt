@@ -9,3 +9,5 @@ uvicorn==0.27.0
 python-multipart==0.0.6
 torch==2.1.2+cpu
 torchaudio==2.1.2+cpu
+# Silero VAD is loaded via torch.hub at runtime (no pip package needed)
+# It requires torch and torchaudio which are already listed above

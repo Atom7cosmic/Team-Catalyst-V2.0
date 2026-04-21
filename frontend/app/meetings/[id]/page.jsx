@@ -455,6 +455,24 @@ export default function MeetingDetailPage({ params }) {
             {['ready', 'completed', 'processing'].includes(meeting.status) && (
               <Button variant="outline" className="border-border text-foreground hover:bg-muted" onClick={() => setActiveTab('summary')}><FileText className="mr-2 h-4 w-4" />View Summary</Button>
             )}
+            {meeting.status === 'completed' && meeting.recordingUrl && !isProcessing && (
+              <Button
+                onClick={async () => {
+                  try {
+                    toast.loading('Starting analysis...', { id: 'analyze' });
+                    await api.post(`/meetings/${meeting._id}/analyze`);
+                    toast.success('Analysis started! Processing your meeting now.', { id: 'analyze', duration: 4000 });
+                    fetchMeeting();
+                  } catch (error) {
+                    toast.error(error?.response?.data?.message || 'Failed to start analysis', { id: 'analyze' });
+                  }
+                }}
+                className="bg-purple-600 hover:bg-purple-700"
+              >
+                <Mic className="mr-2 h-4 w-4" />
+                Analyze Meeting
+              </Button>
+            )}
             {isReady && (<Button onClick={() => router.push(`/meetings/${meeting._id}/schedule-followup`)} className="bg-blue-600 hover:bg-blue-700"><Plus className="mr-2 h-4 w-4" />Schedule Follow-up</Button>)}
           </div>
         </div>
