@@ -75,7 +75,14 @@ const meetingSchema = new mongoose.Schema({
   perDeviceAudioKeys: [{
     userId: String,
     userName: String,
-    audioKey: String
+    audioKey: String,
+    recordingStartTime: Number,
+    chunks: [{
+      timestamp: Number,
+      chunkIndex: Number,
+      voiceRatio: Number,
+      hasVoice: Boolean
+    }]
   }],
   transcriptRaw: { type: String, default: null },
   transcriptSegments: [{
@@ -125,11 +132,11 @@ meetingSchema.index({ 'attendees.user': 1 });
 meetingSchema.index({ parentMeetingId: 1 });
 meetingSchema.index({ createdAt: -1 });
 
-meetingSchema.virtual('attendeeCount').get(function() {
+meetingSchema.virtual('attendeeCount').get(function () {
   return this.attendees.length;
 });
 
-meetingSchema.virtual('duration').get(function() {
+meetingSchema.virtual('duration').get(function () {
   if (this.actualDuration) return this.actualDuration;
   if (this.startedAt && this.endedAt) {
     return Math.round((this.endedAt - this.startedAt) / 60000);

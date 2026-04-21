@@ -35,14 +35,16 @@ const auditLogSchema = new mongoose.Schema({
       // System / misc
       'settings_update', 'prompt_update', 'export_data', 'access_denied',
       // Transcript corrections (from updateTranscriptSegments)
-      'transcript_correction'  // ← was missing
+      'transcript_correction',  // ← was missing
+      
+      'meeting_analyze'
     ]
   },
   resourceType: {
     type: String,
     enum: ['user', 'meeting', 'task', 'sprint', 'recommendation', 'system', 'auth'],
     required: true
-  },
+  },//
   resourceId: {
     type: mongoose.Schema.Types.ObjectId,
     default: null
