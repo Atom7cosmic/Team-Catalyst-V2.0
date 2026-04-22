@@ -39,6 +39,7 @@ export default function MeetingDetailPage({ params }) {
   const [editingSegmentIdx, setEditingSegmentIdx] = useState(null);
   const [transcriptHasChanges, setTranscriptHasChanges] = useState(false);
   const [isSavingTranscript, setIsSavingTranscript] = useState(false);
+  const [cooldownRemaining, setCooldownRemaining] = useState(0);
 
   const SPEAKER_COLORS = [
     'text-blue-400', 'text-green-400', 'text-purple-400',
@@ -53,6 +54,25 @@ export default function MeetingDetailPage({ params }) {
       return () => clearInterval(interval);
     }
   }, [meeting?.status]);
+
+  // 60-second cooldown after meeting ends before Analyze button becomes available
+  useEffect(() => {
+    const calculateCooldown = () => {
+      const endedAt = meeting?.endedAt;
+      const secondsSinceEnd = endedAt
+        ? Math.floor((Date.now() - new Date(endedAt).getTime()) / 1000)
+        : 999;
+      return Math.max(0, 60 - secondsSinceEnd);
+    };
+
+    setCooldownRemaining(calculateCooldown());
+
+    const interval = setInterval(() => {
+      setCooldownRemaining(calculateCooldown());
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [meeting?.endedAt]);
 
   const fetchMeeting = async () => {
     if (!params?.id) return;

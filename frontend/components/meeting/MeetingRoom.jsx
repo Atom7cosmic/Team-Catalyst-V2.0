@@ -395,7 +395,16 @@ export default function MeetingRoom({ meetingId, user }) {
         });
 
         socketRef.current.on('recording-stopped', () => { setIsRecording(false); stopMyRecording(); });
-        socketRef.current.on('meeting-ended', () => { toast.success('Meeting ended by host'); stopMyRecording(); cleanup(); router.push(`/meetings/${meetingId}`); });
+        socketRef.current.on('meeting-ended', async () => {
+  toast.success('Meeting ended by host');
+  await stopMyRecording();
+  if (socketRef.current?.connected) {
+    socketRef.current.emit('flush-my-chunks', { meetingId });
+    await new Promise(r => setTimeout(r, 2000));
+  }
+  cleanup();
+  router.push(`/meetings/${meetingId}`);
+});
         socketRef.current.on('meeting-cancelled', ({ message }) => { setMeetingCancelled(true); toast.error(message || 'Meeting has been cancelled by the host'); stopMyRecording(); cleanup(); setTimeout(() => router.push('/meetings/history'), 2000); });
 
         joinRoom(meetingId, myId);
@@ -517,7 +526,7 @@ export default function MeetingRoom({ meetingId, user }) {
 
           await stopMyRecording();
 
-          await new Promise(r => setTimeout(r, 1000));
+          await new Promise(r => setTimeout(r, 2500));
 
           const perDeviceAudio = await new Promise(resolve => {
             const timeout = setTimeout(() => {

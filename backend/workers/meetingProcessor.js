@@ -372,6 +372,9 @@ async function processMeeting(job) {
   logger.info(`Per-device audio: ${perDeviceAudio?.length || 0} participants`);
   logger.info(`Audio key: ${audioKey}`);
 
+  let localAudioPath = null;
+  let splitChunks = []; // FIX: Track split chunks for cleanup on error
+
   try {
     const meeting = await Meeting.findById(meetingId).populate('attendees.user', 'firstName lastName');
     if (!meeting) throw new Error('Meeting not found');
@@ -398,7 +401,7 @@ async function processMeeting(job) {
     // no 10s chunk boundaries, no hallucinations from silent chunks.
     logger.info('Transcribing mixed audio');
 
-    const localAudioPath = await downloadAudio(audioKey);
+    localAudioPath = await downloadAudio(audioKey);
     const rawDuration = await getAudioDuration(localAudioPath);
     meeting.actualDuration = (rawDuration && !isNaN(rawDuration)) ? Math.round(rawDuration / 60) : 0;
     logger.info(`Audio duration: ${rawDuration}s (ffprobe), file size: ${(fs.statSync(localAudioPath).size / 1024 / 1024).toFixed(1)}MB`);
@@ -409,6 +412,7 @@ async function processMeeting(job) {
     if (fileSizeMB > 24 || rawDuration > 600) {
       logger.info('Large file — splitting into 10-minute WAV chunks');
       const audioChunks = await splitAudio(localAudioPath);
+      splitChunks = audioChunks; // FIX: Track for cleanup
       let timeOffset = 0;
       const allSegs = [];
       let fullText = '';
@@ -500,8 +504,6 @@ async function processMeeting(job) {
       endTime: seg.endTime || seg.end || 0,
       text: seg.text || '',
     }));
-
-    try { fs.unlinkSync(localAudioPath); } catch (_) {}
 
     await updateStep(meetingId, 'diarization', 'done',
       perDeviceAudio?.length > 0
@@ -654,6 +656,11 @@ async function processMeeting(job) {
       }, { arrayFilters: [{ 'elem.status': 'running' }] });
     } catch (updateError) { logger.error(`Failed to update meeting status: ${updateError.message}`); }
     throw error;
+  } finally {
+    // FIX: Ensure cleanup happens on ALL paths (success or error)
+    if (localAudioPath) { try { fs.unlinkSync(localAudioPath); } catch (_) {} }
+    // Cleanup any split chunks that weren't cleaned during processing
+    for (const chunk of splitChunks) { try { fs.unlinkSync(chunk); } catch (_) {} }
   }
 }
 

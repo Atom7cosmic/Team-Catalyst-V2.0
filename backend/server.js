@@ -277,7 +277,8 @@ io.on('connection', (socket) => {
     if (!flushedDeviceAudio.has(meetingId)) flushedDeviceAudio.set(meetingId, new Map());
     const meetingFlushed = flushedDeviceAudio.get(meetingId);
 
-    try {
+    // FIX: Track VAD completion state so get-transcript-queue knows when data is ready
+    const vadCompletePromise = (async () => {
       const uploadedChunks = [];
       let earliestStartTime = myChunks[0].recordingStartTime;
 
@@ -291,48 +292,56 @@ io.on('connection', (socket) => {
         uploadedChunks.push({ audioKey, timestamp: chunk.timestamp, chunkIndex: i, voiceRatio: 0.5, hasVoice: false });
       }
 
-      // Step 2 — Store entry and respond to frontend immediately
-      // Frontend never hits the timeout — it gets confirmation right after S3
+      // Step 2 — Store entry immediately (before responding)
+      // This ensures get-transcript-queue can find the entry even before VAD completes
       meetingFlushed.set(socket.userId, {
         userId: socket.userId,
         userName: displayName,
         recordingStartTime: earliestStartTime,
         chunks: uploadedChunks,
         audioKey: uploadedChunks[0]?.audioKey,
+        _vadComplete: false, // FIX: Flag to indicate VAD is still running
       });
 
       logger.info(`flush-my-chunks S3 complete for ${displayName}: ${uploadedChunks.length} chunks — scoring VAD in background`);
-      socket.emit('my-chunks-flushed', { meetingId, success: true, chunkCount: uploadedChunks.length });
 
       // Step 3 — VAD scoring runs in background (non-blocking)
-      // Scores finish writing to flushedDeviceAudio before user clicks
-      // "Analyze Meeting", so the worker always gets real VAD data.
-      (async () => {
-        try {
-          for (let i = 0; i < myChunks.length; i++) {
-            const voiceRatio = await getVadScore(myChunks[i].audioBuffer, `${socket.userId}-chunk${i}.webm`);
-            uploadedChunks[i].voiceRatio = voiceRatio;
-            uploadedChunks[i].hasVoice = voiceRatio > 0.15;
-            logger.info(`  chunk ${i} ${displayName}: voiceRatio=${voiceRatio.toFixed(3)}`);
-          }
-          // Update stored entry with real VAD scores
-          meetingFlushed.set(socket.userId, {
-            userId: socket.userId,
-            userName: displayName,
-            recordingStartTime: earliestStartTime,
-            chunks: uploadedChunks,
-            audioKey: uploadedChunks[0]?.audioKey,
-          });
-          logger.info(`VAD scoring complete for ${displayName} in meeting ${meetingId}`);
-        } catch (e) {
-          logger.warn(`Background VAD failed for ${displayName}: ${e.message}`);
+      try {
+        for (let i = 0; i < myChunks.length; i++) {
+          const voiceRatio = await getVadScore(myChunks[i].audioBuffer, `${socket.userId}-chunk${i}.webm`);
+          uploadedChunks[i].voiceRatio = voiceRatio;
+          uploadedChunks[i].hasVoice = voiceRatio > 0.15;
+          logger.info(`  chunk ${i} ${displayName}: voiceRatio=${voiceRatio.toFixed(3)}`);
         }
-      })();
+        // Mark VAD as complete
+        meetingFlushed.set(socket.userId, {
+          userId: socket.userId,
+          userName: displayName,
+          recordingStartTime: earliestStartTime,
+          chunks: uploadedChunks,
+          audioKey: uploadedChunks[0]?.audioKey,
+          _vadComplete: true,
+        });
+        logger.info(`VAD scoring complete for ${displayName} in meeting ${meetingId}`);
+      } catch (e) {
+        logger.warn(`Background VAD failed for ${displayName}: ${e.message}`);
+        // Still mark as complete (with neutral scores) so we don't block forever
+        meetingFlushed.set(socket.userId, {
+          userId: socket.userId,
+          userName: displayName,
+          recordingStartTime: earliestStartTime,
+          chunks: uploadedChunks,
+          audioKey: uploadedChunks[0]?.audioKey,
+          _vadComplete: true,
+        });
+      }
+    })();
 
-    } catch (e) {
-      logger.warn(`flush-my-chunks failed for ${displayName}: ${e.message}`);
-      socket.emit('my-chunks-flushed', { meetingId, success: false, chunkCount: 0 });
-    }
+    // Respond immediately after S3 uploads start (don't wait for VAD)
+    socket.emit('my-chunks-flushed', { meetingId, success: true, chunkCount: myChunks.length });
+
+    // Await VAD completion (fire-and-forget, but tracked for debugging)
+    vadCompletePromise.catch(e => logger.warn(`Unhandled VAD promise rejection: ${e.message}`));
   });
 
   // ── Host collects combined per-device audio ───────────────────────────────
@@ -372,7 +381,29 @@ io.on('connection', (socket) => {
       return;
     }
 
-    const perDeviceAudio = Array.from(meetingFlushed.values());
+    // FIX: Wait for all participants' VAD to complete before returning
+    // This prevents race condition where get-transcript-queue fires before
+    // background VAD from flush-my-chunks has finished
+    const allVadPromises = [];
+    for (const [userId, entry] of meetingFlushed.entries()) {
+      if (!entry._vadComplete) {
+        // VAD still running — poll until complete (max 10s wait)
+        const pollVad = async () => {
+          for (let attempts = 0; attempts < 20; attempts++) {
+            await new Promise(r => setTimeout(r, 500));
+            const fresh = flushedDeviceAudio.get(meetingId)?.get(userId);
+            if (fresh?._vadComplete) return fresh;
+          }
+          logger.warn(`VAD did not complete for ${userId} after 10s — returning partial data`);
+          return entry;
+        };
+        allVadPromises.push(pollVad());
+      } else {
+        allVadPromises.push(Promise.resolve(entry));
+      }
+    }
+
+    const perDeviceAudio = await Promise.all(allVadPromises);
     logger.info(`get-transcript-queue: returning ${perDeviceAudio.length} participants with VAD scores`);
     socket.emit('transcript-queue', { meetingId, perDeviceAudio });
   });
