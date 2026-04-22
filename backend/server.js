@@ -345,7 +345,18 @@ io.on('connection', (socket) => {
   });
 
   // ── Host collects combined per-device audio ───────────────────────────────
-  socket.on('get-transcript-queue', async ({ meetingId }) => {
+  socket.on('get-transcript-queue', async ({ meetingId, expectedParticipants }) => {
+    // Wait up to 15s for expected participants to flush their chunks
+    if (expectedParticipants && expectedParticipants > 1) {
+      for (let attempts = 0; attempts < 30; attempts++) {
+        const meetingFlushed = flushedDeviceAudio.get(meetingId);
+        const flushedCount = meetingFlushed?.size || 0;
+        if (flushedCount >= expectedParticipants) break;
+        logger.info(`get-transcript-queue: waiting for participants (${flushedCount}/${expectedParticipants})`);
+        await new Promise(r => setTimeout(r, 500));
+      }
+    }
+
     const meetingFlushed = flushedDeviceAudio.get(meetingId);
 
     if (!meetingFlushed || meetingFlushed.size === 0) {

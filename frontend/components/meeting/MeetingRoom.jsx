@@ -539,7 +539,9 @@ export default function MeetingRoom({ meetingId, user }) {
               resolve(pda || []);
             });
 
-            socketRef.current?.emit('get-transcript-queue', { meetingId });
+            // The expected count is all connected peers (non-host)
+            const expectedParticipants = Object.keys(peersRef.current).length;
+            socketRef.current?.emit('get-transcript-queue', { meetingId, expectedParticipants });
           });
 
           const fd = new FormData();

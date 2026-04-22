@@ -487,10 +487,11 @@ export default function MeetingDetailPage({ params }) {
                     toast.error(error?.response?.data?.message || 'Failed to start analysis', { id: 'analyze' });
                   }
                 }}
-                className="bg-purple-600 hover:bg-purple-700"
+                className="bg-purple-600 hover:bg-purple-700 disabled:opacity-50"
+                disabled={cooldownRemaining > 0}
               >
                 <Mic className="mr-2 h-4 w-4" />
-                Analyze Meeting
+                {cooldownRemaining > 0 ? `Analyze Meeting (${cooldownRemaining}s)` : 'Analyze Meeting'}
               </Button>
             )}
             {isReady && (<Button onClick={() => router.push(`/meetings/${meeting._id}/schedule-followup`)} className="bg-blue-600 hover:bg-blue-700"><Plus className="mr-2 h-4 w-4" />Schedule Follow-up</Button>)}
