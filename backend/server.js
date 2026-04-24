@@ -450,6 +450,12 @@ io.on('connection', (socket) => {
       transcriptQueue.set(meetingId, []);
       flushedDeviceAudio.delete(meetingId);
       io.to(meetingId).emit('recording-started');
+      
+      // Ping Hugging Face to ensure the server is awake and models are loaded
+      // by the time the user clicks Stop Recording and processing starts.
+      fetch(`${DIARIZATION_URL}/health`, { timeout: 5000 })
+        .then(() => logger.info(`Pre-warmed diarization service for meeting ${meetingId}`))
+        .catch(e => logger.warn(`Failed to pre-warm diarization service: ${e.message}`));
     }
   });
 
