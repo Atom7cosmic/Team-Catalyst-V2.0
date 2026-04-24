@@ -3,6 +3,8 @@ import { Toaster } from 'react-hot-toast'
 import { AuthProvider } from '@/context/AuthContext'
 import { Inter } from 'next/font/google'
 
+import ClientLayoutWrapper from '@/components/layout/ClientLayoutWrapper'
+
 const inter = Inter({ subsets: ['latin'] })
 
 export const metadata = {
@@ -36,7 +38,9 @@ export default function RootLayout({ children }) {
         />
 
         <AuthProvider>
-          {children}
+          <ClientLayoutWrapper>
+            {children}
+          </ClientLayoutWrapper>
 
           <Toaster
             position="top-right"

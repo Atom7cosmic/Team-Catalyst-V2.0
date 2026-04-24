@@ -62,5 +62,5 @@ export default function MeetingRoomPage({ params }) {
     );
   }
 
-  return <MeetingRoom meetingId={params.id} user={user} />;
+  return <MeetingRoom meetingId={params.id} user={user} meetingName={meeting?.name} />;
 }

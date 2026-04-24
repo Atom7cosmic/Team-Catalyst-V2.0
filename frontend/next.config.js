@@ -1,7 +1,7 @@
 /** @type {import('next').NextConfig} */
 
 const getApiUrl = () => {
-  let url = process.env.NEXT_PUBLIC_API_URL || "https://orgyx-backend.onrender.com";
+  let url = process.env.NEXT_PUBLIC_API_URL || "https://laudable-warmth-production-9f2f.up.railway.app";
   if (!url.startsWith('http://') && !url.startsWith('https://')) {
     url = `https://${url}`;
   }
@@ -12,13 +12,13 @@ const nextConfig = {
   reactStrictMode: false,
 
   images: {
-    domains: ["localhost", "orgyx-backend.onrender.com"],
+    domains: ["localhost", "laudable-warmth-production-9f2f.up.railway.app"],
     unoptimized: true,
   },
 
   env: {
     NEXT_PUBLIC_API_URL: API_URL,
-    NEXT_PUBLIC_SOCKET_URL: process.env.NEXT_PUBLIC_SOCKET_URL || "https://orgyx-backend.onrender.com",
+    NEXT_PUBLIC_SOCKET_URL: process.env.NEXT_PUBLIC_SOCKET_URL || "https://laudable-warmth-production-9f2f.up.railway.app",
   },
 
   eslint: {

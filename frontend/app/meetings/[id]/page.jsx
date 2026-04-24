@@ -3,7 +3,8 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
-import DashboardLayout from '@/components/layout/DashboardLayout';
+import { useMeetingDetail } from '@/hooks/useMeetingDetail';
+
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -28,11 +29,9 @@ import toast from 'react-hot-toast';
 export default function MeetingDetailPage({ params }) {
   const router = useRouter();
   const { user } = useAuth();
-  const [meeting, setMeeting] = useState(null);
-  const [isLoading, setIsLoading] = useState(true);
+  const { meeting, processingStatus, isLoading, error, refetch, setMeeting, setProcessingStatus } = useMeetingDetail(params?.id);
   const [isEnding, setIsEnding] = useState(false);
   const [showEndConfirm, setShowEndConfirm] = useState(false);
-  const [processingStatus, setProcessingStatus] = useState(null);
   const [activeTab, setActiveTab] = useState('summary');
 
   const [transcriptSegments, setTranscriptSegments] = useState([]);
@@ -46,16 +45,17 @@ export default function MeetingDetailPage({ params }) {
     'text-yellow-400', 'text-pink-400', 'text-cyan-400',
   ];
 
-  useEffect(() => { fetchMeeting(); }, [params?.id]);
-
+  // Handle processing status fallback (WebSocket handles the real-time updates)
   useEffect(() => {
     if (meeting?.status === 'processing') {
-      const interval = setInterval(fetchProcessingStatus, 5000);
+      const interval = setInterval(refetch, 30000); // 30s fallback
       return () => clearInterval(interval);
     }
-  }, [meeting?.status]);
+  }, [meeting?.status, refetch]);
 
-  // 60-second cooldown after meeting ends before Analyze button becomes available
+  // FIX 3: 60-second cooldown after meeting ends before Analyze button becomes available.
+  // If endedAt is missing, secondsSinceEnd = 999, so remaining = Math.max(0, 60-999) = 0
+  // → button is immediately active when endedAt is absent. This is correct behavior.
   useEffect(() => {
     const calculateCooldown = () => {
       const endedAt = meeting?.endedAt;
@@ -68,36 +68,15 @@ export default function MeetingDetailPage({ params }) {
     setCooldownRemaining(calculateCooldown());
 
     const interval = setInterval(() => {
-      setCooldownRemaining(calculateCooldown());
+      const remaining = calculateCooldown();
+      setCooldownRemaining(remaining);
+      if (remaining === 0) clearInterval(interval);
     }, 1000);
 
     return () => clearInterval(interval);
   }, [meeting?.endedAt]);
 
-  const fetchMeeting = async () => {
-    if (!params?.id) return;
-    try {
-      const response = await api.get(`/meetings/${params.id}`);
-      setMeeting(response.data.meeting);
-      setTranscriptSegments(response.data.meeting?.transcriptSegments || []);
-      if (response.data.meeting?.status === 'processing') fetchProcessingStatus();
-    } catch (error) {
-      console.error('Failed to fetch meeting:', error);
-      toast.error('Failed to fetch meeting details');
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const fetchProcessingStatus = async () => {
-    try {
-      const response = await api.get(`/meetings/${params.id}/processing-status`);
-      setProcessingStatus(response.data);
-      if (response.data.status === 'ready') fetchMeeting();
-    } catch (error) {
-      console.error('Failed to fetch processing status:', error);
-    }
-  };
+  // Removed manual fetchMeeting and fetchProcessingStatus here, they are handled by useMeetingDetail
 
   const handleEndMeeting = async () => {
     setShowEndConfirm(false);
@@ -105,7 +84,7 @@ export default function MeetingDetailPage({ params }) {
     try {
       await api.post(`/meetings/${params.id}/end`);
       toast.success('Meeting ended successfully');
-      fetchMeeting();
+      refetch();
     } catch (error) {
       toast.error(error?.response?.data?.message || 'Failed to end meeting');
     } finally {
@@ -399,7 +378,7 @@ export default function MeetingDetailPage({ params }) {
 
   if (isLoading) {
     return (
-      <DashboardLayout>
+      <>
         <div className="space-y-6">
           <div className="flex items-center gap-4">
             <Button variant="ghost" size="icon" onClick={() => router.push('/meetings/history')}><ArrowLeft className="h-5 w-5" /></Button>
@@ -407,24 +386,24 @@ export default function MeetingDetailPage({ params }) {
           </div>
           <CardSkeleton />
         </div>
-      </DashboardLayout>
+      </>
     );
   }
 
   if (!meeting) {
     return (
-      <DashboardLayout>
+      <>
         <div className="text-center py-12">
           <AlertCircle className="h-12 w-12 mx-auto mb-4 text-muted-foreground" />
           <p className="text-muted-foreground">Meeting not found</p>
           <Button className="mt-4" onClick={() => router.push('/meetings/history')}>Back to Meetings</Button>
         </div>
-      </DashboardLayout>
+      </>
     );
   }
 
   return (
-    <DashboardLayout>
+    <>
       <div className="space-y-6">
 
         {showEndConfirm && (
@@ -464,8 +443,7 @@ export default function MeetingDetailPage({ params }) {
           <div className="flex gap-2 flex-wrap">
             {isReady && (<Button variant="outline" onClick={handleExportPDF} className="border-border text-foreground hover:bg-muted"><Download className="mr-2 h-4 w-4" />Export PDF</Button>)}
             {isReady && (<Button variant="outline" onClick={handleExportDOCX} className="border-border text-foreground hover:bg-muted"><FileDown className="mr-2 h-4 w-4" />Export DOCX</Button>)}
-            {meeting.status === 'scheduled' && (<Button onClick={() => router.push(`/meetings/${meeting._id}/room`)} className="bg-green-600 hover:bg-green-700"><Mic className="mr-2 h-4 w-4" />Join Meeting</Button>)}
-            {meeting.status === 'live' && (<Button onClick={() => router.push(`/meetings/${meeting._id}/room`)} className="bg-green-600 hover:bg-green-700"><Mic className="mr-2 h-4 w-4" />Rejoin Meeting</Button>)}
+            {['scheduled', 'live'].includes(meeting.status) && (<Button onClick={() => router.push(`/meetings/${meeting._id}/room`)} className="bg-green-600 hover:bg-green-700"><Mic className="mr-2 h-4 w-4" />Join Meeting</Button>)}
             {(meeting.status === 'live' || meeting.status === 'scheduled') && isHost && (
               <Button onClick={() => setShowEndConfirm(true)} disabled={isEnding} className="bg-red-600 hover:bg-red-700">
                 {isEnding ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <StopCircle className="mr-2 h-4 w-4" />}
@@ -475,25 +453,65 @@ export default function MeetingDetailPage({ params }) {
             {['ready', 'completed', 'processing'].includes(meeting.status) && (
               <Button variant="outline" className="border-border text-foreground hover:bg-muted" onClick={() => setActiveTab('summary')}><FileText className="mr-2 h-4 w-4" />View Summary</Button>
             )}
-            {meeting.status === 'completed' && meeting.recordingUrl && !isProcessing && (
-              <Button
-                onClick={async () => {
-                  try {
-                    toast.loading('Starting analysis...', { id: 'analyze' });
-                    await api.post(`/meetings/${meeting._id}/analyze`);
-                    toast.success('Analysis started! Processing your meeting now.', { id: 'analyze', duration: 4000 });
-                    fetchMeeting();
-                  } catch (error) {
-                    toast.error(error?.response?.data?.message || 'Failed to start analysis', { id: 'analyze' });
-                  }
-                }}
-                className="bg-purple-600 hover:bg-purple-700 disabled:opacity-50"
-                disabled={cooldownRemaining > 0}
-              >
-                <Mic className="mr-2 h-4 w-4" />
-                {cooldownRemaining > 0 ? `Analyze Meeting (${cooldownRemaining}s)` : 'Analyze Meeting'}
-              </Button>
+            
+            {meeting.status === 'completed' && !isProcessing && (
+              meeting.recordingUrl ? (
+                <>
+                  {cooldownRemaining > 0 ? (
+                    <div className="relative group">
+                      <Button
+                        variant="outline"
+                        className="w-full sm:w-auto border-purple-500/20 text-purple-400 bg-purple-500/5 hover:bg-purple-500/10 hover:text-purple-300 relative pl-12 transition-all overflow-hidden"
+                        disabled
+                      >
+                        <div className="absolute left-3 top-1/2 -translate-y-1/2 flex items-center justify-center">
+                          <svg width="24" height="24" viewBox="0 0 40 40" className="transform -rotate-90">
+                            <circle cx="20" cy="20" r="16" fill="transparent" stroke="currentColor" strokeWidth="4" className="text-purple-500/20" />
+                            <circle
+                              cx="20" cy="20" r="16" fill="transparent" stroke="currentColor" strokeWidth="4"
+                              className="text-purple-400 transition-all duration-1000 ease-linear"
+                              style={{ 
+                                strokeDasharray: 100.5, 
+                                strokeDashoffset: (1 - cooldownRemaining / 60) * 100.5 
+                              }}
+                            />
+                          </svg>
+                          <span className="absolute text-[10px] font-bold text-purple-300">{cooldownRemaining}</span>
+                        </div>
+                        <span className="opacity-70">Waiting for audio sync...</span>
+                      </Button>
+                    </div>
+                  ) : (
+                    <Button
+                      onClick={async () => {
+                        try {
+                          toast.loading('Starting analysis...', { id: 'analyze' });
+                          await api.post(`/meetings/${meeting._id}/analyze`);
+                          toast.success('Analysis started! Processing your meeting now.', { id: 'analyze', duration: 4000 });
+                          refetch();
+                        } catch (error) {
+                          toast.error(error?.response?.data?.message || 'Failed to start analysis', { id: 'analyze' });
+                        }
+                      }}
+                      className="w-full sm:w-auto bg-purple-600 hover:bg-purple-700 text-white shadow-lg shadow-purple-500/20 analyze-ready transition-all"
+                    >
+                      ✨ Analyze Meeting
+                    </Button>
+                  )}
+                </>
+              ) : (
+                <div className="relative group">
+                  <Button disabled className="bg-purple-600/50 cursor-not-allowed">
+                    <Mic className="mr-2 h-4 w-4 opacity-50" />
+                    Analyze Meeting
+                  </Button>
+                  <div className="absolute top-full left-1/2 -translate-x-1/2 mt-2 w-max px-3 py-1.5 bg-slate-800 text-slate-200 text-xs rounded shadow-lg pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity z-50">
+                    Recording missing. Upload it first to analyze.
+                  </div>
+                </div>
+              )
             )}
+
             {isReady && (<Button onClick={() => router.push(`/meetings/${meeting._id}/schedule-followup`)} className="bg-blue-600 hover:bg-blue-700"><Plus className="mr-2 h-4 w-4" />Schedule Follow-up</Button>)}
           </div>
         </div>
@@ -546,7 +564,6 @@ export default function MeetingDetailPage({ params }) {
                         <p className="text-xs text-muted-foreground mb-3">AI has assigned speakers. Click any name to correct it.</p>
                         <ScrollArea className="h-[400px]">
                           <div className="space-y-3 pr-2">
-                            {/* ── FIX: Group consecutive same-speaker segments into one dialogue box ── */}
                             {(() => {
                               const groups = [];
                               transcriptSegments.forEach((seg, i) => {
@@ -571,7 +588,6 @@ export default function MeetingDetailPage({ params }) {
                                           autoFocus
                                           defaultValue={group.speaker}
                                           onChange={(e) => {
-                                            // Correct all segments in this group at once
                                             group.texts.forEach(t => handleSpeakerChange(t.idx, e.target.value));
                                           }}
                                           className="text-sm bg-background border border-border rounded px-2 py-0.5 text-foreground focus:outline-none"
@@ -597,7 +613,6 @@ export default function MeetingDetailPage({ params }) {
                                     )}
                                     <span className="text-xs text-muted-foreground">{formatTime(group.startTime)}</span>
                                   </div>
-                                  {/* All sentences joined — one readable paragraph per speaker turn */}
                                   <p className="text-foreground text-sm leading-relaxed">
                                     {group.texts.map(t => t.text).join(' ')}
                                   </p>
@@ -673,6 +688,6 @@ export default function MeetingDetailPage({ params }) {
           </div>
         </div>
       </div>
-    </DashboardLayout>
+    </>
   );
 }

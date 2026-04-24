@@ -2,7 +2,8 @@
 
 import { useState, useEffect, useRef } from 'react'
 import Link from 'next/link'
-import { usePathname } from 'next/navigation'
+import { motion, AnimatePresence } from 'framer-motion'
+import { usePathname, useRouter } from 'next/navigation'
 import { useAuth } from '@/context/AuthContext'
 import useAuthStore from '@/store/authStore'
 import useNotificationStore from '@/store/notificationStore'
@@ -53,37 +54,9 @@ const adminNavGroups = [
   }
 ]
 
-export default function DashboardLayout({ children }) {
-  const pathname = usePathname()
-  const { user, logout } = useAuthStore()
-  const { isAdmin } = useAuth()
-  const { unreadCount, fetchNotifications } = useNotificationStore()
-
-  const [sidebarOpen, setSidebarOpen] = useState(false)
-  const [userMenuOpen, setUserMenuOpen] = useState(false)
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
-  const mainRef = useRef(null)
-
-  // Reset scroll position on navigation
-  useEffect(() => {
-    if (mainRef.current) {
-      mainRef.current.scrollTop = 0
-    }
-  }, [pathname])
-
-  useEffect(() => {
-    fetchNotifications(50)
-  }, [fetchNotifications])
-
-  const handleLogout = async () => {
-    await logout()
-    toast.success('Logged out successfully')
-    window.location.href = '/login'
-  }
-
-  const navGroups = isAdmin ? adminNavGroups : userNavGroups
-
-  const SidebarNav = ({ onClose }) => (
+const SidebarNav = ({ onClose, pathname, sidebarCollapsed, isAdmin }) => {
+  const navGroups = isAdmin ? adminNavGroups : userNavGroups;
+  return (
     <div className="flex-1 overflow-y-auto py-4 px-3 space-y-6 scrollbar-none">
       {navGroups.map((group, idx) => (
         <div key={idx}>
@@ -122,6 +95,63 @@ export default function DashboardLayout({ children }) {
       ))}
     </div>
   )
+}
+
+export default function DashboardLayout({ children }) {
+  const pathname = usePathname()
+  const router = useRouter()
+  const { user, logout } = useAuthStore()
+  const { isAdmin } = useAuth()
+  const { notifications, unreadCount, fetchNotifications, markAsRead } = useNotificationStore()
+
+  const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [userMenuOpen, setUserMenuOpen] = useState(false)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const mainRef = useRef(null)
+  const userMenuRef = useRef(null)
+
+  // Reset scroll position on navigation
+  useEffect(() => {
+    if (mainRef.current) {
+      mainRef.current.scrollTop = 0
+    }
+  }, [pathname])
+
+  const latestUnread = notifications?.find(n => !n.read)
+
+  const handleLatestNotificationClick = () => {
+    if (latestUnread) {
+      markAsRead(latestUnread._id);
+      if (latestUnread.link) {
+        router.push(latestUnread.link);
+      } else {
+        router.push('/notifications');
+      }
+    }
+  }
+
+  // Handle click outside to close user menu
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (userMenuRef.current && !userMenuRef.current.contains(event.target)) {
+        setUserMenuOpen(false)
+      }
+    }
+    if (userMenuOpen) {
+      document.addEventListener('mousedown', handleClickOutside)
+    }
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [userMenuOpen])
+
+  useEffect(() => {
+    fetchNotifications(50)
+  }, [fetchNotifications])
+
+  const handleLogout = async () => {
+    await logout()
+    toast.success('Logged out successfully')
+    window.location.href = '/login'
+  }
 
   return (
     <div className="min-h-screen bg-background text-foreground flex">
@@ -142,13 +172,18 @@ export default function DashboardLayout({ children }) {
                 <X className="h-5 w-5" />
               </Button>
             </div>
-            <SidebarNav onClose={() => setSidebarOpen(false)} />
+            <SidebarNav onClose={() => setSidebarOpen(false)} pathname={pathname} sidebarCollapsed={sidebarCollapsed} isAdmin={isAdmin} />
           </div>
         </div>
       )}
 
       {/* Desktop Sidebar */}
-      <div className={`hidden lg:flex lg:flex-col bg-surface border-r border-border transition-all duration-300 relative ${sidebarCollapsed ? 'w-20' : 'w-64'}`}>
+      <motion.div 
+        initial={{ x: -280 }}
+        animate={{ x: 0 }}
+        transition={{ duration: 0.5, ease: [0.16, 1, 0.3, 1] }}
+        className={`hidden lg:flex flex-col bg-surface border-r border-border transition-all duration-300 z-10 ${sidebarCollapsed ? 'w-20' : 'w-64'}`}
+      >
         <div className="flex h-16 items-center px-4 border-b border-border justify-between">
           <Link href="/dashboard" className={`flex items-center gap-2 overflow-hidden ${sidebarCollapsed ? 'justify-center w-full' : ''}`}>
             <div className="w-8 h-8 shrink-0 rounded-lg bg-primary flex items-center justify-center">
@@ -158,7 +193,7 @@ export default function DashboardLayout({ children }) {
           </Link>
         </div>
         
-        <SidebarNav onClose={() => {}} />
+        <SidebarNav onClose={() => {}} pathname={pathname} sidebarCollapsed={sidebarCollapsed} isAdmin={isAdmin} />
 
         <div className="mt-auto p-4 border-t border-border">
           <Button 
@@ -170,10 +205,10 @@ export default function DashboardLayout({ children }) {
             {sidebarCollapsed ? <ChevronsRight className="h-5 w-5" /> : <><ChevronsLeft className="h-5 w-5 mr-2" /> Collapse</>}
           </Button>
         </div>
-      </div>
+      </motion.div>
 
       {/* Main Content */}
-      <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+      <div className="flex-1 flex flex-col min-w-0 h-screen overflow-hidden">
 
         {/* Header */}
         <header className="sticky top-0 z-30 bg-background/80 backdrop-blur-md border-b border-border h-16 shrink-0">
@@ -200,8 +235,22 @@ export default function DashboardLayout({ children }) {
             <div className="flex items-center gap-2 sm:gap-4">
               <ThemeToggle />
 
-              <Link href="/notifications" className="relative">
-                <Button variant="ghost" size="icon" className="text-muted-foreground hover:bg-accent/50 hover:text-foreground rounded-full h-9 w-9">
+              {/* Latest Unread Notification preview */}
+              {latestUnread && (
+                <button 
+                  onClick={handleLatestNotificationClick} 
+                  className="hidden lg:flex items-center gap-2 max-w-[240px] xl:max-w-sm mr-2 px-3 py-1.5 bg-muted/50 rounded-full border border-border overflow-hidden hover:bg-muted transition-colors text-left"
+                >
+                  <span className="w-2 h-2 rounded-full bg-destructive flex-shrink-0 animate-pulse"></span>
+                  <span className="text-xs truncate text-muted-foreground flex-1">
+                    <span className="font-semibold text-foreground mr-1">{latestUnread.title}</span> 
+                    <span className="opacity-80">— {latestUnread.message}</span>
+                  </span>
+                </button>
+              )}
+
+              <Link href="/notifications" className="relative group/bell">
+                <Button variant="ghost" size="icon" className="text-muted-foreground group-hover/bell:bg-surface-hover group-hover/bell:text-foreground rounded-full h-9 w-9 transition-colors">
                   <Bell className="h=[18px] w-[18px]" strokeWidth={1.5} />
                   {unreadCount > 0 && (
                     <span className="absolute top-0 right-0 h-4 w-4 rounded-full bg-destructive text-[10px] font-bold text-destructive-foreground flex items-center justify-center shadow-sm border border-background">
@@ -213,7 +262,7 @@ export default function DashboardLayout({ children }) {
 
               <div className="h-6 w-[1px] bg-border mx-1" />
 
-              <div className="relative">
+              <div className="relative" ref={userMenuRef}>
                 <button
                   onClick={() => setUserMenuOpen(!userMenuOpen)}
                   className="flex items-center gap-2 pl-1 pr-2 py-1 rounded-full hover:bg-surface-hover transition-colors"
@@ -235,9 +284,7 @@ export default function DashboardLayout({ children }) {
                 </button>
 
                 {userMenuOpen && (
-                  <>
-                    <div className="fixed inset-0 z-40" onClick={() => setUserMenuOpen(false)} />
-                    <div className="absolute right-0 top-full mt-2 w-56 rounded-xl bg-card border border-border shadow-elevated z-50 overflow-hidden transform origin-top-right transition-all animate-in fade-in slide-in-from-top-2">
+                  <div className="absolute right-0 top-full mt-2 w-56 rounded-xl bg-card border border-border shadow-elevated z-50 overflow-hidden transform origin-top-right transition-all animate-in fade-in slide-in-from-top-2">
                       <div className="px-4 py-3 border-b border-border bg-surface/50">
                         <p className="text-sm font-medium">{user?.firstName} {user?.lastName}</p>
                         <p className="text-xs text-muted-foreground truncate">{user?.email}</p>
@@ -262,7 +309,6 @@ export default function DashboardLayout({ children }) {
                         </button>
                       </div>
                     </div>
-                  </>
                 )}
               </div>
             </div>
@@ -270,11 +316,21 @@ export default function DashboardLayout({ children }) {
           </div>
         </header>
 
-        <main ref={mainRef} className="flex-1 overflow-y-auto overscroll-none bg-background scroll-smooth flex flex-col">
-          <div className="mx-auto max-w-7xl w-full flex-1 flex flex-col p-4 lg:p-8 animate-in fade-in duration-500">
-            {children}
-          </div>
-        </main>
+        <AnimatePresence mode="wait">
+          <motion.main 
+            key={pathname}
+            initial={{ opacity: 0, y: 10, scale: 0.99 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -10, scale: 0.99 }}
+            transition={{ duration: 0.4, ease: "easeOut" }}
+            ref={mainRef} 
+            className="flex-1 overflow-y-auto overscroll-none bg-background scroll-smooth flex flex-col"
+          >
+            <div className="mx-auto max-w-7xl w-full flex-1 flex flex-col p-4 lg:p-8">
+              {children}
+            </div>
+          </motion.main>
+        </AnimatePresence>
 
       </div>
     </div>

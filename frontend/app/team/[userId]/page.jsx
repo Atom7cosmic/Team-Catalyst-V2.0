@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import DashboardLayout from '@/components/layout/DashboardLayout';
+
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -73,7 +73,7 @@ export default function UserDetailPage({ params }) {
 
   if (isLoading) {
     return (
-      <DashboardLayout>
+      <>
         <div className="space-y-6">
           <div className="flex items-center gap-4">
             <Button variant="ghost" size="icon" onClick={() => router.back()}>
@@ -85,24 +85,24 @@ export default function UserDetailPage({ params }) {
             <CardSkeleton /><CardSkeleton /><CardSkeleton /><CardSkeleton />
           </div>
         </div>
-      </DashboardLayout>
+      </>
     );
   }
 
   if (!user) {
     return (
-      <DashboardLayout>
+      <>
         <div className="text-center py-12">
           <Users className="h-12 w-12 mx-auto mb-4 text-muted-foreground" />
           <p className="text-muted-foreground">User not found</p>
           <Button className="mt-4" onClick={() => router.push('/team')}>Back to Team</Button>
         </div>
-      </DashboardLayout>
+      </>
     );
   }
 
   return (
-    <DashboardLayout>
+    <>
       <div className="space-y-6">
 
         {/* Header */}
@@ -343,6 +343,6 @@ export default function UserDetailPage({ params }) {
           </TabsContent>
         </Tabs>
       </div>
-    </DashboardLayout>
+    </>
   );
 }

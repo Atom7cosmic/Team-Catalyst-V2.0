@@ -1,7 +1,8 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import DashboardLayout from '@/components/layout/DashboardLayout';
+import { useRouter } from 'next/navigation';
+
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -31,6 +32,7 @@ const notificationColors = {
 };
 
 export default function NotificationsPage() {
+  const router = useRouter();
   const [notifications, setNotifications] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
@@ -93,21 +95,73 @@ export default function NotificationsPage() {
     setDeleteModalOpen(true);
   };
 
+  const handleNotificationClick = (notification, e) => {
+    if (e.target.closest('button')) return; // Ignore button clicks
+
+    const markReadIfUnread = () => {
+      if (!notification.read) {
+        markAsRead(notification._id);
+      }
+    };
+
+    if (notification.link) {
+      markReadIfUnread();
+      router.push(notification.link);
+      return;
+    }
+
+    if (notification.entityType && notification.entityId) {
+      let routed = true;
+      switch (notification.entityType) {
+        case 'meeting':
+          router.push(`/meetings/history`);
+          break;
+        case 'task':
+          router.push(`/tasks`);
+          break;
+        case 'user':
+          router.push(`/team/${notification.entityId}`);
+          break;
+        case 'recommendation':
+          router.push(`/recommendations`);
+          break;
+        default: 
+          routed = false;
+          break;
+      }
+      if (routed) {
+        markReadIfUnread();
+        return;
+      }
+    }
+
+    if (notification.type.includes('meeting')) {
+      markReadIfUnread();
+      router.push('/meetings/history');
+    } else if (notification.type.includes('task')) {
+      markReadIfUnread();
+      router.push('/tasks');
+    } else if (notification.type.includes('recommendation') || notification.type.includes('performance') || notification.type.includes('risk')) {
+      markReadIfUnread();
+      router.push('/recommendations');
+    }
+  };
+
   const unreadCount = notifications.filter(n => !n.read).length;
 
   if (isLoading) {
     return (
-      <DashboardLayout>
+      <>
         <div className="space-y-6">
           <h1 className="text-3xl font-bold">Notifications</h1>
           <ListSkeleton count={5} />
         </div>
-      </DashboardLayout>
+      </>
     );
   }
 
   return (
-    <DashboardLayout>
+    <>
       <div className="space-y-6">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div>
@@ -117,7 +171,7 @@ export default function NotificationsPage() {
             </p>
           </div>
           {unreadCount > 0 && (
-            <Button variant="outline" onClick={markAllAsRead} className="border-slate-700">
+            <Button variant="outline" onClick={markAllAsRead} className="border-border">
               <Check className="mr-2 h-4 w-4" />
               Mark All Read
             </Button>
@@ -144,10 +198,11 @@ export default function NotificationsPage() {
                   return (
                     <div
                       key={notification._id}
-                      className={`flex items-start gap-4 p-4 rounded-lg border transition-colors ${
+                      onClick={(e) => handleNotificationClick(notification, e)}
+                      className={`flex items-start gap-4 p-4 rounded-lg border transition-colors cursor-pointer hover:shadow-sm ${
                         notification.read
-                          ? 'bg-muted/30 border-muted'
-                          : 'bg-muted border-slate-700'
+                          ? 'bg-muted/30 border-border/50 hover:bg-muted/50'
+                          : 'bg-muted border-border hover:bg-muted/80'
                       }`}
                     >
                       <div className={`p-2 rounded-lg shrink-0 ${notificationColors[notification.type] || notificationColors.general}`}>
@@ -156,11 +211,11 @@ export default function NotificationsPage() {
                       <div className="flex-1 min-w-0">
                         <div className="flex items-start justify-between gap-4">
                           <div>
-                            <p className={`font-medium ${notification.read ? 'text-muted-foreground' : 'text-slate-100'}`}>
+                            <p className={`font-medium ${notification.read ? 'text-muted-foreground' : 'text-foreground'}`}>
                               {notification.title}
                             </p>
-                            <p className="text-sm text-slate-500 mt-1">{notification.message}</p>
-                            <p className="text-xs text-slate-600 mt-2">
+                            <p className="text-sm text-muted-foreground mt-1">{notification.message}</p>
+                            <p className="text-xs text-muted-foreground/70 mt-2">
                               {format(new Date(notification.createdAt), 'MMM d, yyyy HH:mm')}
                             </p>
                           </div>
@@ -187,7 +242,7 @@ export default function NotificationsPage() {
                         </div>
                       </div>
                       {!notification.read && (
-                        <Badge className="bg-blue-500/20 text-blue-400 shrink-0">New</Badge>
+                        <Badge className="bg-blue-500/10 text-blue-600 dark:text-blue-400 shrink-0">New</Badge>
                       )}
                     </div>
                   );
@@ -207,6 +262,6 @@ export default function NotificationsPage() {
         confirmText="Delete"
         type="danger"
       />
-    </DashboardLayout>
+    </>
   );
 }

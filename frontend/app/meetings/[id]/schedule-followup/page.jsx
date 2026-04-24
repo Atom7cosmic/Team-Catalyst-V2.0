@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import DashboardLayout from '@/components/layout/DashboardLayout';
+
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -81,6 +81,7 @@ export default function ScheduleFollowupPage({ params }) {
         scheduledDate: new Date(data.scheduledDate).toISOString(),
       });
       toast.success('Follow-up meeting scheduled successfully');
+      router.refresh();
       router.push(`/meetings/${params.id}`);
     } catch (error) {
       console.error('Failed to schedule follow-up:', error);
@@ -92,7 +93,7 @@ export default function ScheduleFollowupPage({ params }) {
 
   if (isLoading) {
     return (
-      <DashboardLayout>
+      <>
         <div className="space-y-6">
           <div className="flex items-center gap-4">
             <Button variant="ghost" size="icon" onClick={() => router.back()}>
@@ -101,12 +102,12 @@ export default function ScheduleFollowupPage({ params }) {
             <CardSkeleton className="flex-1" />
           </div>
         </div>
-      </DashboardLayout>
+      </>
     );
   }
 
   return (
-    <DashboardLayout>
+    <>
       <div className="max-w-2xl mx-auto space-y-6">
         <div className="flex items-center gap-4">
           <Button variant="ghost" size="icon" onClick={() => router.back()}>
@@ -236,6 +237,6 @@ export default function ScheduleFollowupPage({ params }) {
           </CardContent>
         </Card>
       </div>
-    </DashboardLayout>
+    </>
   );
 }

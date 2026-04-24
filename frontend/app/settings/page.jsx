@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import DashboardLayout from '@/components/layout/DashboardLayout';
+
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -125,17 +125,17 @@ export default function SettingsPage() {
 
   if (authLoading || !user) {
     return (
-      <DashboardLayout>
+      <>
         <div className="space-y-6">
           <h1 className="text-3xl font-bold">Settings</h1>
           <FormSkeleton />
         </div>
-      </DashboardLayout>
+      </>
     );
   }
 
   return (
-    <DashboardLayout>
+    <>
       <div className="space-y-6">
         <div>
           <h1 className="text-3xl font-bold">Settings</h1>
@@ -276,6 +276,6 @@ export default function SettingsPage() {
           </div>
         </form>
       </div>
-    </DashboardLayout>
+    </>
   );
 }

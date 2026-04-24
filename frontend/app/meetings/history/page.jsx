@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import DashboardLayout from '@/components/layout/DashboardLayout';
+
 import { Card, CardContent, CardHeader } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -68,7 +68,7 @@ export default function MeetingsHistoryPage() {
   };
 
   return (
-    <DashboardLayout>
+    <>
       <div className="space-y-6">
 
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -186,6 +186,6 @@ export default function MeetingsHistoryPage() {
           </CardContent>
         </Card>
       </div>
-    </DashboardLayout>
+    </>
   );
 }

@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import DashboardLayout from '@/components/layout/DashboardLayout';
+
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -68,7 +68,7 @@ export default function TasksPage() {
       toast.success('Task created');
       setShowModal(false);
       setForm({ title: '', description: '', assignee: '', priority: 'medium', dueDate: '' });
-      fetchTasks();
+      setTimeout(() => fetchTasks(), 300); // Give MongoDB time to index
     } catch (error) {
       toast.error(error.response?.data?.message || 'Failed to create task');
     } finally {
@@ -110,7 +110,7 @@ export default function TasksPage() {
   };
 
   return (
-    <DashboardLayout>
+    <>
       <div className="space-y-6">
         <div className="flex items-center justify-between">
           <h1 className="text-3xl font-bold">Tasks</h1>
@@ -253,6 +253,6 @@ export default function TasksPage() {
           </div>
         </div>
       )}
-    </DashboardLayout>
+    </>
   );
 }

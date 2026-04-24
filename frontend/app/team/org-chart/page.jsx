@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useRef } from 'react';
 import * as d3 from 'd3';
-import DashboardLayout from '@/components/layout/DashboardLayout';
+
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import api from '@/lib/axios';
 import toast from 'react-hot-toast';
@@ -227,7 +227,7 @@ export default function OrgChartPage() {
   };
 
   return (
-    <DashboardLayout>
+    <>
       <div className="space-y-6">
         <h1 className="text-2xl font-bold">Org Chart</h1>
         <Card className="bg-card border-muted">
@@ -247,6 +247,6 @@ export default function OrgChartPage() {
           </CardContent>
         </Card>
       </div>
-    </DashboardLayout>
+    </>
   );
 }

@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "https://orgyx-backend.onrender.com";
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "https://laudable-warmth-production-9f2f.up.railway.app";
 
 const api = axios.create({
   baseURL: `${API_URL}/api`,

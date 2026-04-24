@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
 import { AuthGuard } from '@/components/guards/RouteGuard';
-import DashboardLayout from '@/components/layout/DashboardLayout';
+
 import AdminDashboard from '@/components/dashboard/AdminDashboard';
 import KPIWidget from '@/components/shared/KPIWidget';
 import EmployeeAnalyticsCard from '@/components/shared/EmployeeAnalyticsCard';
@@ -41,23 +41,23 @@ function DashboardContent() {
 
   if (isDataLoading) {
     return (
-      <DashboardLayout>
+      <>
         <div className="flex h-[80vh] items-center justify-center">
           <div className="animate-pulse-slow flex flex-col items-center gap-4">
             <div className="w-12 h-12 border-4 border-primary/20 border-t-primary rounded-full animate-spin" />
             <p className="text-muted-foreground font-medium uppercase tracking-widest text-xs">Loading Workspace</p>
           </div>
         </div>
-      </DashboardLayout>
+      </>
     );
   }
 
   // ── ADMIN gets their own dashboard ──────────────────────────────────────────
   if (user?.isAdmin) {
     return (
-      <DashboardLayout>
+      <>
         <AdminDashboard />
-      </DashboardLayout>
+      </>
     );
   }
   // ────────────────────────────────────────────────────────────────────────────
@@ -72,7 +72,7 @@ function DashboardContent() {
   const isSuperior = user?.roleLevel <= 5;
 
   return (
-    <DashboardLayout>
+    <>
       <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
         
         {/* Welcome Header */}
@@ -273,7 +273,7 @@ function DashboardContent() {
           </div>
         )}
       </div>
-    </DashboardLayout>
+    </>
   );
 }
 

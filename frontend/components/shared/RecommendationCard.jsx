@@ -16,20 +16,20 @@ import api from '@/lib/axios';
 const categoryConfig = {
   promote: {
     icon: TrendingUp,
-    color: 'bg-green-500/20 text-green-500 border-green-500/30',
-    badgeColor: 'bg-green-500/20 text-green-500',
+    color: 'bg-green-500/10 text-green-600 dark:text-green-400 border-green-500/30',
+    badgeColor: 'bg-green-500/20 text-green-700 dark:text-green-400',
     label: 'Promote'
   },
   monitor: {
     icon: TrendingDown,
-    color: 'bg-yellow-500/20 text-yellow-500 border-yellow-500/30',
-    badgeColor: 'bg-yellow-500/20 text-yellow-500',
+    color: 'bg-yellow-500/10 text-yellow-600 dark:text-yellow-400 border-yellow-500/30',
+    badgeColor: 'bg-yellow-500/20 text-yellow-700 dark:text-yellow-400',
     label: 'Monitor'
   },
   at_risk: {
     icon: AlertTriangle,
-    color: 'bg-red-500/20 text-red-500 border-red-500/30',
-    badgeColor: 'bg-red-500/20 text-red-500',
+    color: 'bg-red-500/10 text-red-600 dark:text-red-400 border-red-500/30',
+    badgeColor: 'bg-red-500/20 text-red-700 dark:text-red-400',
     label: 'At Risk'
   }
 };
@@ -189,12 +189,12 @@ export default function RecommendationCard({ recommendation, showActions = true,
             <div className="flex items-center gap-3 flex-wrap">
               <div className="flex items-center gap-2">
                 <Avatar className="h-8 w-8">
-                  <AvatarFallback className="bg-slate-700 text-slate-300 text-xs">
+                  <AvatarFallback className="bg-secondary text-secondary-foreground text-xs">
                     {user?.firstName?.[0]}{user?.lastName?.[0]}
                   </AvatarFallback>
                 </Avatar>
                 <div>
-                  <p className="font-medium text-slate-100">{employeeName}</p>
+                  <p className="font-medium text-foreground">{employeeName}</p>
                   <p className="text-xs text-muted-foreground">{user?.role}</p>
                 </div>
               </div>
@@ -236,7 +236,7 @@ export default function RecommendationCard({ recommendation, showActions = true,
 
             {/* Reasoning */}
             {recommendation.reasoning && (
-              <p className="mt-3 text-sm text-slate-300 line-clamp-2">
+              <p className="mt-3 text-sm text-foreground/80 line-clamp-2">
                 {recommendation.reasoning}
               </p>
             )}
@@ -267,20 +267,20 @@ export default function RecommendationCard({ recommendation, showActions = true,
 
             {/* Dismissed banner */}
             {recommendation.status === 'dismissed' && (
-              <div className="mt-3 p-2 bg-slate-500/10 border border-slate-500/20 rounded-lg">
+              <div className="mt-3 p-2 bg-muted border border-border rounded-lg">
                 <div className="flex items-start gap-2">
-                  <XCircle className="h-4 w-4 text-slate-500 shrink-0 mt-0.5" />
+                  <XCircle className="h-4 w-4 text-muted-foreground shrink-0 mt-0.5" />
                   <div>
-                    <p className="text-xs text-slate-400">
+                    <p className="text-xs text-muted-foreground">
                       Dismissed
                       {recommendation.dismissedAt && (
-                        <span className="text-slate-500 ml-1">
+                        <span className="text-muted-foreground/60 ml-1">
                           · {new Date(recommendation.dismissedAt).toLocaleDateString()}
                         </span>
                       )}
                     </p>
                     {recommendation.dismissedReason && (
-                      <p className="text-xs text-slate-400 mt-1 italic">
+                      <p className="text-xs text-muted-foreground/80 mt-1 italic">
                         &quot;{recommendation.dismissedReason}&quot;
                       </p>
                     )}
@@ -307,7 +307,7 @@ export default function RecommendationCard({ recommendation, showActions = true,
                       size="sm"
                       variant="outline"
                       onClick={() => setDialog('dismiss')}
-                      className="border-slate-600 text-muted-foreground hover:bg-slate-700"
+                      className="border-border text-muted-foreground hover:bg-secondary"
                     >
                       <XCircle className="h-3.5 w-3.5 mr-1" />
                       Dismiss

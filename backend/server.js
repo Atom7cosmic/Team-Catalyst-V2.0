@@ -323,6 +323,18 @@ io.on('connection', (socket) => {
           _vadComplete: true,
         });
         logger.info(`VAD scoring complete for ${displayName} in meeting ${meetingId}`);
+        // Persist VAD scores to S3 so the worker's scanPerDeviceAudio() can read them
+        try {
+          const vadKey = `meetings/${meetingId}/device-${socket.userId}-vad.json`;
+          const vadPayload = Buffer.from(JSON.stringify({
+            userId: socket.userId,
+            chunks: uploadedChunks.map(c => ({ chunkIndex: c.chunkIndex, voiceRatio: c.voiceRatio, hasVoice: c.hasVoice })),
+          }));
+          await uploadFile(vadKey, vadPayload, 'application/json');
+          logger.info(`VAD sidecar written: ${vadKey}`);
+        } catch (vadWriteErr) {
+          logger.warn(`VAD sidecar upload failed for ${displayName}: ${vadWriteErr.message}`);
+        }
       } catch (e) {
         logger.warn(`Background VAD failed for ${displayName}: ${e.message}`);
         // Still mark as complete (with neutral scores) so we don't block forever
@@ -334,6 +346,15 @@ io.on('connection', (socket) => {
           audioKey: uploadedChunks[0]?.audioKey,
           _vadComplete: true,
         });
+        // Write neutral-score sidecar so worker doesn't wait for a file that never arrives
+        try {
+          const vadKey = `meetings/${meetingId}/device-${socket.userId}-vad.json`;
+          const vadPayload = Buffer.from(JSON.stringify({
+            userId: socket.userId,
+            chunks: uploadedChunks.map(c => ({ chunkIndex: c.chunkIndex, voiceRatio: 0.5, hasVoice: false })),
+          }));
+          await uploadFile(vadKey, vadPayload, 'application/json');
+        } catch (_) { /* best-effort */ }
       }
     })();
 

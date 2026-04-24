@@ -340,6 +340,8 @@ async function scanPerDeviceAudio(meetingId) {
     const byUser = {};
     for (const key of keys) {
       const basename = path.basename(key);
+      // Skip VAD sidecar files (device-{userId}-vad.json) — handled separately below
+      if (basename.endsWith('-vad.json')) continue;
       // e.g. device-69d24b6fe3d5b5709b11c5fe-chunk4-1777011360394.webm
       const match = basename.match(/^device-([^-]+(?:-[^-]+)*)-chunk(\d+)-(\d+)\.webm$/);
       if (!match) {
@@ -367,6 +369,31 @@ async function scanPerDeviceAudio(meetingId) {
     // Sort chunks within each user by chunkIndex
     for (const entry of Object.values(byUser)) {
       entry.chunks.sort((a, b) => a.chunkIndex - b.chunkIndex);
+    }
+
+    // Load VAD sidecar files written by server.js flush-my-chunks handler.
+    // Each sidecar: meetings/{meetingId}/device-{userId}-vad.json
+    // Contains real Silero voiceRatio values scored in the background.
+    for (const [userId, entry] of Object.entries(byUser)) {
+      try {
+        const vadKey = `meetings/${meetingId}/device-${userId}-vad.json`;
+        const vadUrl = await getFileUrl(vadKey, 60);
+        const res = await fetch(vadUrl, { timeout: 8000 });
+        if (res.ok) {
+          const vadData = await res.json();
+          const scoreMap = {};
+          for (const vc of vadData.chunks || []) scoreMap[vc.chunkIndex] = vc;
+          for (const chunk of entry.chunks) {
+            if (scoreMap[chunk.chunkIndex] !== undefined) {
+              chunk.voiceRatio = scoreMap[chunk.chunkIndex].voiceRatio;
+              chunk.hasVoice  = scoreMap[chunk.chunkIndex].hasVoice;
+            }
+          }
+          logger.info(`VAD sidecar loaded for ${userId}: [${entry.chunks.map(c => c.voiceRatio.toFixed(2)).join(', ')}]`);
+        }
+      } catch (e) {
+        logger.warn(`VAD sidecar unavailable for ${userId}: ${e.message} — keeping neutral 0.5`);
+      }
     }
 
     return Object.values(byUser);

@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import DashboardLayout from '@/components/layout/DashboardLayout';
+
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -126,7 +126,7 @@ export default function TeamPage() {
 
   if (isLoading) {
     return (
-      <DashboardLayout>
+      <>
         <div className="space-y-6">
           <h1 className="text-3xl font-bold">Team</h1>
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -134,12 +134,12 @@ export default function TeamPage() {
             <div><CardSkeleton /></div>
           </div>
         </div>
-      </DashboardLayout>
+      </>
     );
   }
 
   return (
-    <DashboardLayout>
+    <>
       <div className="space-y-6">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div>
@@ -393,6 +393,6 @@ export default function TeamPage() {
           </div>
         </div>
       )}
-    </DashboardLayout>
+    </>
   );
 }

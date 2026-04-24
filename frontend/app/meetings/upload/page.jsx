@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import DashboardLayout from '@/components/layout/DashboardLayout';
+
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -79,7 +79,7 @@ export default function UploadMeetingPage() {
   };
 
   return (
-    <DashboardLayout>
+    <>
       <div className="max-w-2xl mx-auto">
         <Card>
           <CardHeader>
@@ -189,6 +189,6 @@ export default function UploadMeetingPage() {
           </CardContent>
         </Card>
       </div>
-    </DashboardLayout>
+    </>
   );
 }

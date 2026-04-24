@@ -35,7 +35,7 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="min-h-screen flex w-full h-screen overflow-hidden text-[#1a1c1b] dark:text-slate-100 bg-[#faf9f7] dark:bg-slate-950 transition-colors duration-300">
+    <div className="min-h-screen flex w-full overflow-y-auto text-[#1a1c1b] dark:text-slate-100 bg-[#faf9f7] dark:bg-slate-950 transition-colors duration-300">
       {/* Theme Toggle Button positioned globally */}
       <div className="absolute top-6 right-6 z-50">
         <ThemeToggle />
@@ -44,10 +44,10 @@ export default function LoginPage() {
       {/* Left Panel - Hero Section (60%) */}
       <div className="hidden lg:flex lg:w-[60%] bg-[url('/hero-login.png')] bg-cover bg-center relative">
         {/* Soft light overlay for light mode, dark overlay for dark mode */}
-        <div className="absolute inset-0 bg-[#e3e2e0]/60 dark:bg-slate-950/70 mix-blend-multiply transition-colors duration-300" />
+        <div className="absolute inset-0 bg-[#e3e2e0]/60 mix-blend-multiply dark:mix-blend-overlay dark:bg-slate-900/30 transition-colors duration-300" />
         
         {/* Content layering */}
-        <div className="relative z-10 flex flex-col justify-end p-16 w-full h-full bg-gradient-to-t from-[#faf9f7]/90 via-[#faf9f7]/40 dark:from-slate-950/90 dark:via-slate-950/40 to-transparent">
+        <div className="relative z-10 flex flex-col justify-end p-16 w-full h-full bg-gradient-to-t from-[#faf9f7]/90 via-[#faf9f7]/40 dark:from-slate-950/90 dark:via-slate-950/10 to-transparent">
           <h1 className="text-6xl font-serif font-bold mb-4 tracking-tight text-[#18334a] dark:text-white">ORG-OS</h1>
           <p className="text-xl text-[#51606c] dark:text-slate-300 font-medium max-w-md">
             The Digital Architect’s Atelier. Orchestrate your enterprise with supreme clarity and professional precision.

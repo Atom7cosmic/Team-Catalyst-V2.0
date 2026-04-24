@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
-import DashboardLayout from '@/components/layout/DashboardLayout';
+
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -105,17 +105,17 @@ export default function RecommendationDetailPage({ params }) {
 
   if (isLoading) {
     return (
-      <DashboardLayout>
+      <>
         <div className="flex items-center justify-center min-h-[400px]">
           <div className="animate-spin h-8 w-8 border-2 border-primary border-t-transparent rounded-full" />
         </div>
-      </DashboardLayout>
+      </>
     );
   }
 
   if (!recommendation) {
     return (
-      <DashboardLayout>
+      <>
         <div className="text-center py-12">
           <AlertTriangle className="h-12 w-12 mx-auto mb-4 text-slate-500" />
           <p className="text-muted-foreground">Recommendation not found</p>
@@ -123,7 +123,7 @@ export default function RecommendationDetailPage({ params }) {
             Back to Recommendations
           </Button>
         </div>
-      </DashboardLayout>
+      </>
     );
   }
 
@@ -133,7 +133,7 @@ export default function RecommendationDetailPage({ params }) {
   const emp = recommendation.user;
 
   return (
-    <DashboardLayout>
+    <>
       <div className="space-y-6">
 
         {/* Header */}
@@ -353,6 +353,6 @@ export default function RecommendationDetailPage({ params }) {
         </div>
 
       </div>
-    </DashboardLayout>
+    </>
   );
 }

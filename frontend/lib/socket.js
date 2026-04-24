@@ -38,6 +38,11 @@ export const disconnectSocket = () => {
   }
 };
 
+export const refreshSocket = () => {
+  disconnectSocket();
+  return getSocket();
+};
+
 export const joinRoom = (meetingId, userId) => {
   const s = getSocket();
   s.emit('join-room', { meetingId, userId });
@@ -76,6 +81,7 @@ export const stopRecording = (meetingId) => {
 export default {
   getSocket,
   disconnectSocket,
+  refreshSocket,
   joinRoom,
   leaveRoom,
   sendMessage,

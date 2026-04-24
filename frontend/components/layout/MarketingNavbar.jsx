@@ -18,25 +18,25 @@ export function MarketingNavbar() {
 
         {/* Center Links */}
         <div className="hidden lg:flex items-center gap-8 text-[15px] font-medium text-[#4a4a48] dark:text-slate-300">
-          <Link href="#" className="flex items-center hover:text-[#1c1c1a] dark:hover:text-white transition-colors">
-            Product <ChevronDown className="ml-1 h-4 w-4 opacity-50" />
+          <Link href="#product" className="flex items-center hover:text-[#1c1c1a] dark:hover:text-white transition-colors">
+            Product
           </Link>
-          <Link href="#" className="flex items-center hover:text-[#1c1c1a] dark:hover:text-white transition-colors">
-            Solutions <ChevronDown className="ml-1 h-4 w-4 opacity-50" />
+          <Link href="#solutions" className="flex items-center hover:text-[#1c1c1a] dark:hover:text-white transition-colors">
+            Solutions
           </Link>
-          <Link href="#" className="flex items-center hover:text-[#1c1c1a] dark:hover:text-white transition-colors">
-            Resources <ChevronDown className="ml-1 h-4 w-4 opacity-50" />
-          </Link>
-          <Link href="/pricing" className="hover:text-[#1c1c1a] dark:hover:text-white transition-colors">Pricing</Link>
-          <Link href="/enterprise" className="hover:text-[#1c1c1a] dark:hover:text-white transition-colors">Enterprise</Link>
+          <Link href="#pricing" className="hover:text-[#1c1c1a] dark:hover:text-white transition-colors">Pricing</Link>
+          <Link href="#enterprise" className="hover:text-[#1c1c1a] dark:hover:text-white transition-colors">Enterprise</Link>
         </div>
 
         {/* Right Actions */}
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-5">
           <ThemeToggle />
+          <Link href="/login" className="hidden sm:block">
+            <span className="text-[15px] font-medium text-[#4a4a48] dark:text-slate-300 hover:text-[#1c1c1a] dark:hover:text-white transition-colors">Log in</span>
+          </Link>
           <Link href="/login">
-            <Button className="bg-[#bda077] hover:bg-[#a98f6a] dark:bg-[#bda077]/90 dark:hover:bg-[#a98f6a] text-white rounded-full px-7 h-10 font-medium transition-all shadow-sm">
-              Request Demo
+            <Button className="bg-[#1c1c1a] hover:bg-[#31312e] dark:bg-white dark:hover:bg-gray-200 text-white dark:text-[#1c1c1a] rounded-full px-7 h-10 font-medium transition-transform hover:scale-105 active:scale-95 shadow-md">
+              Sign Up Free
             </Button>
           </Link>
         </div>
