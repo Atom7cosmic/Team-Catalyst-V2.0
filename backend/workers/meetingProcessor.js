@@ -10,7 +10,7 @@ const { Meeting, PromptTemplate, Performance, Notification } = require('../model
 const { chromaClient } = require('../config/chroma');
 const { generateEmbedding } = require('../ai/embeddings');
 const { meetingAnalysisChain, chunkTranscript, scoreAttendeeChain } = require('../ai/langchain');
-const { getFileUrl, uploadFile } = require('../config/s3');
+const { getFileUrl, uploadFile, listFiles } = require('../config/s3');
 const winston = require('winston');
 
 const execAsync = promisify(require('child_process').exec);
@@ -25,6 +25,17 @@ const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 const DIARIZATION_URL = process.env.DIARIZATION_URL || 'http://diarization:8001';
 const CHUNK_DURATION_MS = 10000;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FIX 1: runWithTimeout — wraps any async step in a Promise.race so a hung
+// LLM/Whisper/pyannote call cannot stall the worker indefinitely.
+// ─────────────────────────────────────────────────────────────────────────────
+function runWithTimeout(promise, ms, label) {
+  const timeout = new Promise((_, reject) =>
+    setTimeout(() => reject(new Error(`${label} timed out after ${ms / 1000}s`)), ms)
+  );
+  return Promise.race([promise, timeout]);
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // HALLUCINATION FILTER
@@ -75,14 +86,48 @@ async function downloadAudio(audioKey) {
   return localPath;
 }
 
-function getAudioDuration(filePath) {
+// ─────────────────────────────────────────────────────────────────────────────
+// FIX 2: getAudioDuration now falls back to probing the converted WAV when
+// ffprobe returns 0 on the WebM. WebM files from MediaRecorder often have
+// missing/corrupt duration metadata that ffprobe can't read, but the WAV
+// converted by ffmpeg always has accurate duration headers.
+// ─────────────────────────────────────────────────────────────────────────────
+function probeFileDuration(filePath) {
   return new Promise((resolve) => {
     ffmpeg.ffprobe(filePath, (err, metadata) => {
-      if (err) { logger.warn(`ffprobe error: ${err.message}`); return resolve(0); }
+      if (err) { logger.warn(`ffprobe error on ${filePath}: ${err.message}`); return resolve(0); }
       const duration = metadata?.format?.duration;
       resolve(typeof duration === 'number' && !isNaN(duration) ? duration : 0);
     });
   });
+}
+
+async function getAudioDuration(filePath) {
+  const duration = await probeFileDuration(filePath);
+  if (duration > 0) return duration;
+
+  // Duration was 0 — file may be a WebM with missing metadata.
+  const fileSizeMB = fs.statSync(filePath).size / (1024 * 1024);
+  logger.warn(`ffprobe returned 0s duration for ${path.basename(filePath)} (${fileSizeMB.toFixed(1)}MB) — converting to WAV to get accurate duration`);
+
+  // Convert to WAV and probe that instead
+  let wavPath = null;
+  try {
+    wavPath = await convertWebmToWav(filePath);
+    if (wavPath && wavPath !== filePath) {
+      const wavDuration = await probeFileDuration(wavPath);
+      logger.info(`WAV fallback duration: ${wavDuration}s`);
+      return wavDuration;
+    }
+  } catch (e) {
+    logger.warn(`WAV fallback duration probe failed: ${e.message}`);
+  } finally {
+    // Clean up the temporary WAV only if it is different from the input
+    if (wavPath && wavPath !== filePath) {
+      try { fs.unlinkSync(wavPath); } catch (_) {}
+    }
+  }
+  return 0;
 }
 
 async function splitAudio(filePath, chunkDuration = 600) {
@@ -127,12 +172,17 @@ async function transcribeWithGroq(audioPath) {
       if (tempWav !== audioPath) pathToTranscribe = tempWav;
     }
     logger.info(`Transcribing: ${pathToTranscribe}`);
-    const transcription = await groq.audio.transcriptions.create({
-      file: fs.createReadStream(pathToTranscribe),
-      model: 'whisper-large-v3',
-      response_format: 'verbose_json',
-      temperature: 0,
-    });
+    // FIX 1: Whisper call wrapped in timeout — Groq API can hang on large files
+    const transcription = await runWithTimeout(
+      groq.audio.transcriptions.create({
+        file: fs.createReadStream(pathToTranscribe),
+        model: 'whisper-large-v3',
+        response_format: 'verbose_json',
+        temperature: 0,
+      }),
+      300000, // 5 minutes per chunk
+      'Whisper transcription'
+    );
     if (tempWav && tempWav !== audioPath) { try { fs.unlinkSync(tempWav); } catch (_) {} }
     return transcription;
   } catch (error) {
@@ -150,7 +200,12 @@ async function diarizeWithPyannote(audioPath, numSpeakers) {
     const form = new FormData();
     form.append('file', fs.createReadStream(audioPath), { filename: path.basename(audioPath), contentType: 'audio/wav' });
     const url = numSpeakers > 1 ? `${DIARIZATION_URL}/diarize?num_speakers=${numSpeakers}` : `${DIARIZATION_URL}/diarize`;
-    const response = await fetch(url, { method: 'POST', body: form, headers: form.getHeaders(), timeout: 300000 });
+    // FIX 1: Pyannote diarization wrapped in timeout
+    const response = await runWithTimeout(
+      fetch(url, { method: 'POST', body: form, headers: form.getHeaders() }),
+      300000, // 5 minutes
+      'Pyannote diarization'
+    );
     if (!response.ok) { logger.warn(`Pyannote failed: ${await response.text()}`); return null; }
     const result = await response.json();
     logger.info(`Pyannote complete: ${result.segments.length} segments, ${result.num_speakers_detected} speakers`);
@@ -227,11 +282,16 @@ Return ONLY a valid JSON array (no markdown, no explanation):
 [{"index":0,"speaker":"${attendeeNames[0]}"},{"index":1,"speaker":"${attendeeNames[Math.min(1, attendeeNames.length - 1)]}"}]`;
 
     try {
-      const response = await groq.chat.completions.create({
-        model: 'llama-3.3-70b-versatile',
-        messages: [{ role: 'user', content: prompt }],
-        temperature: 0.1, max_tokens: 4096
-      });
+      // FIX 1: LLM speaker inference wrapped in timeout
+      const response = await runWithTimeout(
+        groq.chat.completions.create({
+          model: 'llama-3.3-70b-versatile',
+          messages: [{ role: 'user', content: prompt }],
+          temperature: 0.1, max_tokens: 4096
+        }),
+        120000, // 2 minutes per batch
+        `LLM speaker inference batch ${batchStart}`
+      );
       const content = response.choices[0]?.message?.content || '[]';
       const clean = content.replace(/```json|```/g, '').trim();
       let assignments = [];
@@ -251,22 +311,85 @@ Return ONLY a valid JSON array (no markdown, no explanation):
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SPEAKER ASSIGNMENT FROM PER-DEVICE CHUNK TIMELINE WITH VAD
+// FIX 3: scanPerDeviceAudio
 //
-// Each chunk now carries a voiceRatio (0.0–1.0) from Silero VAD:
-//   voiceRatio ≈ 0.8–1.0  → speaker was actively talking in this chunk
-//   voiceRatio ≈ 0.0–0.1  → speaker was silent (ambient noise only)
+// Instead of trusting job.data.perDeviceAudio (which was collected at
+// upload-recording time and is often empty because non-host flush-my-chunks
+// calls were still in-flight), we scan S3 directly for all device-* files
+// under the meeting prefix at job execution time.
 //
-// Speaker assignment logic:
-//   1. Find all participants whose chunk window covers the segment midpoint
-//   2. If only one participant's window covers it → unambiguous assignment
-//   3. If multiple windows overlap → pick the participant with highest voiceRatio
-//      (with earphones this gap is large and reliable — active speaker ≈ 0.8+,
-//       silent participants ≈ 0.05)
-//   4. If no window covers the segment → nearest window end (gap between chunks)
-//   5. If VAD scores are all neutral (0.5, service unavailable) → fall back to
-//      closest window start heuristic as before
+// By the time the worker runs (job has a 30s delay set in meetingController),
+// all participants' S3 uploads are guaranteed complete.
+//
+// Returns an array in the same shape as the old perDeviceAudio:
+// [{ userId, userName, recordingStartTime, chunks: [{ audioKey, timestamp, chunkIndex, voiceRatio }] }]
 // ─────────────────────────────────────────────────────────────────────────────
+async function scanPerDeviceAudio(meetingId) {
+  try {
+    const prefix = `meetings/${meetingId}/device-`;
+    const keys = await listFiles(prefix);
+
+    if (!keys || keys.length === 0) {
+      logger.info(`scanPerDeviceAudio: no device files found for meeting ${meetingId}`);
+      return [];
+    }
+
+    logger.info(`scanPerDeviceAudio: found ${keys.length} device files for meeting ${meetingId}`);
+
+    // Parse key format: device-{userId}-chunk{index}-{timestamp}.webm
+    const byUser = {};
+    for (const key of keys) {
+      const basename = path.basename(key);
+      // e.g. device-69d24b6fe3d5b5709b11c5fe-chunk4-1777011360394.webm
+      const match = basename.match(/^device-([^-]+(?:-[^-]+)*)-chunk(\d+)-(\d+)\.webm$/);
+      if (!match) {
+        logger.warn(`scanPerDeviceAudio: unrecognised key format: ${basename}`);
+        continue;
+      }
+      const userId = match[1];
+      const chunkIndex = parseInt(match[2], 10);
+      const timestamp = parseInt(match[3], 10);
+
+      if (!byUser[userId]) {
+        byUser[userId] = {
+          userId,
+          userName: userId, // will be resolved from meeting attendees below
+          recordingStartTime: timestamp,
+          chunks: [],
+        };
+      }
+      if (timestamp < byUser[userId].recordingStartTime) {
+        byUser[userId].recordingStartTime = timestamp;
+      }
+      byUser[userId].chunks.push({ audioKey: key, timestamp, chunkIndex, voiceRatio: 0.5 });
+    }
+
+    // Sort chunks within each user by chunkIndex
+    for (const entry of Object.values(byUser)) {
+      entry.chunks.sort((a, b) => a.chunkIndex - b.chunkIndex);
+    }
+
+    return Object.values(byUser);
+  } catch (e) {
+    logger.warn(`scanPerDeviceAudio failed: ${e.message} — falling back to no per-device audio`);
+    return [];
+  }
+}
+
+// Resolve usernames from meeting attendees for the scanned device entries
+function resolveUserNames(deviceEntries, meeting) {
+  const userMap = {};
+  for (const attendee of meeting.attendees) {
+    const uid = attendee.user?._id?.toString() || attendee.user?.toString();
+    const name = `${attendee.user?.firstName || ''}  ${attendee.user?.lastName || ''}`.trim();
+    if (uid && name) userMap[uid] = name;
+  }
+  return deviceEntries.map(entry => ({
+    ...entry,
+    userName: userMap[entry.userId] || entry.userName || 'Participant',
+  }));
+}
+
 async function assignSpeakersFromDeviceTimeline(segments, perDeviceAudio) {
   if (!segments.length || !perDeviceAudio.length) return segments;
 
@@ -287,14 +410,12 @@ async function assignSpeakersFromDeviceTimeline(segments, perDeviceAudio) {
 
   logger.info(`assignSpeakersFromDeviceTimeline: meetingEpoch=${new Date(meetingEpoch).toISOString()}`);
 
-  // Check if VAD scores are available (not all neutral 0.5)
   const allScores = perDeviceAudio
     .flatMap(d => (d.chunks || []).map(c => c.voiceRatio))
     .filter(v => typeof v === 'number');
   const vadAvailable = allScores.length > 0 && allScores.some(v => v !== 0.5);
   logger.info(`VAD available: ${vadAvailable} (${allScores.length} scores, sample: ${allScores.slice(0, 6).map(v => v.toFixed(2)).join(', ')})`);
 
-  // Build coverage windows with voiceRatio
   const windows = [];
   for (const device of perDeviceAudio) {
     if (!Array.isArray(device.chunks) || device.chunks.length === 0) continue;
@@ -322,7 +443,6 @@ async function assignSpeakersFromDeviceTimeline(segments, perDeviceAudio) {
     let assignedName;
 
     if (covering.length === 0) {
-      // No window covers this moment — nearest window end
       if (windows.length === 0) {
         assignedName = perDeviceAudio[0]?.userName || 'Unknown';
       } else {
@@ -330,17 +450,12 @@ async function assignSpeakersFromDeviceTimeline(segments, perDeviceAudio) {
         assignedName = nearest.userName;
       }
     } else if (covering.length === 1) {
-      // Unambiguous
       assignedName = covering[0].userName;
     } else if (vadAvailable) {
-      // VAD available — pick participant with highest voice activity
-      // This is the key improvement: with earphones, active speaker ≈ 0.8+
-      // and silent participants ≈ 0.05, making this decision reliable
       const best = covering.reduce((a, b) => a.voiceRatio > b.voiceRatio ? a : b);
       assignedName = best.userName;
       logger.debug(`VAD resolved overlap at ${midpoint.toFixed(1)}s: ${covering.map(c => `${c.userName}=${c.voiceRatio.toFixed(2)}`).join(', ')} → ${assignedName}`);
     } else {
-      // VAD unavailable — fall back to closest window start heuristic
       const best = covering.reduce((a, b) => Math.abs(a.windowStart - midpoint) < Math.abs(b.windowStart - midpoint) ? a : b);
       assignedName = best.userName;
     }
@@ -362,24 +477,32 @@ function formatTime(seconds) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CORE PROCESSING FUNCTION
-// Used by both the automatic post-recording pipeline and the manual
-// "Analyze Meeting" button trigger.
 // ─────────────────────────────────────────────────────────────────────────────
 async function processMeeting(job) {
-  const { meetingId, audioKey, perDeviceAudio } = job.data;
+  const { meetingId, audioKey } = job.data;
   const io = global.io;
   logger.info(`Starting processing for meeting ${meetingId}`);
-  logger.info(`Per-device audio: ${perDeviceAudio?.length || 0} participants`);
   logger.info(`Audio key: ${audioKey}`);
 
   let localAudioPath = null;
-  let splitChunks = []; // FIX: Track split chunks for cleanup on error
+  let splitChunks = [];
 
   try {
     const meeting = await Meeting.findById(meetingId).populate('attendees.user', 'firstName lastName');
     if (!meeting) throw new Error('Meeting not found');
 
-    // Reset processing steps so the UI shows fresh progress
+    // ── FIX 3: Scan S3 for per-device audio instead of reading job.data ──────
+    // job.data.perDeviceAudio was set at upload-recording time (before non-host
+    // flush-my-chunks calls completed). Scanning S3 now guarantees we see every
+    // participant's files since the job has a 30s startup delay.
+    let perDeviceAudio = await scanPerDeviceAudio(meetingId);
+    perDeviceAudio = resolveUserNames(perDeviceAudio, meeting);
+    logger.info(`Per-device audio from S3 scan: ${perDeviceAudio.length} participants`);
+    if (perDeviceAudio.length > 0) {
+      logger.info(`Participants found: ${perDeviceAudio.map(d => `${d.userName} (${d.chunks.length} chunks)`).join(', ')}`);
+    }
+
+    // Reset processing steps
     meeting.processingSteps = [
       { step: 'upload', status: 'done', timestamp: new Date() },
       { step: 'transcription', status: 'pending' },
@@ -396,28 +519,36 @@ async function processMeeting(job) {
     if (!audioKey) throw new Error('No mixed audio recording available — cannot transcribe');
 
     // ── TRANSCRIPTION ─────────────────────────────────────────────────────
-    // Always use the mixed audio file for transcription quality.
-    // Mixed audio = one continuous Whisper call, full sentence context,
-    // no 10s chunk boundaries, no hallucinations from silent chunks.
     logger.info('Transcribing mixed audio');
-
     localAudioPath = await downloadAudio(audioKey);
+
+    // FIX 2: getAudioDuration now falls back to WAV probe when WebM returns 0
     const rawDuration = await getAudioDuration(localAudioPath);
     meeting.actualDuration = (rawDuration && !isNaN(rawDuration)) ? Math.round(rawDuration / 60) : 0;
-    logger.info(`Audio duration: ${rawDuration}s (ffprobe), file size: ${(fs.statSync(localAudioPath).size / 1024 / 1024).toFixed(1)}MB`);
+    const fileSizeMB = fs.statSync(localAudioPath).size / (1024 * 1024);
+    logger.info(`Audio duration: ${rawDuration}s (ffprobe), file size: ${fileSizeMB.toFixed(1)}MB`);
+
+    // Warn if duration still 0 after fallback — file may be corrupt
+    if (rawDuration === 0 && fileSizeMB > 0.1) {
+      logger.warn(`Duration is 0s but file is ${fileSizeMB.toFixed(1)}MB — file may have corrupt headers. Attempting to continue.`);
+    }
 
     let groqResult = null;
-    const fileSizeMB = fs.statSync(localAudioPath).size / (1024 * 1024);
 
     if (fileSizeMB > 24 || rawDuration > 600) {
       logger.info('Large file — splitting into 10-minute WAV chunks');
       const audioChunks = await splitAudio(localAudioPath);
-      splitChunks = audioChunks; // FIX: Track for cleanup
+      splitChunks = audioChunks;
       let timeOffset = 0;
       const allSegs = [];
       let fullText = '';
       for (const chunk of audioChunks) {
-        const r = await transcribeWithGroq(chunk);
+        // FIX 1: each chunk transcription has its own timeout
+        const r = await runWithTimeout(
+          transcribeWithGroq(chunk),
+          360000, // 6 minutes per chunk (includes WAV conversion)
+          `Whisper chunk ${chunk}`
+        );
         fullText += (r?.text || '') + '\n';
         (r?.segments || []).forEach(seg => {
           if (!isHallucination(seg.text)) {
@@ -429,7 +560,12 @@ async function processMeeting(job) {
       }
       groqResult = { text: fullText, segments: allSegs };
     } else {
-      groqResult = await transcribeWithGroq(localAudioPath);
+      // FIX 1: single-file transcription also has a timeout
+      groqResult = await runWithTimeout(
+        transcribeWithGroq(localAudioPath),
+        300000, // 5 minutes
+        'Whisper transcription (single file)'
+      );
     }
 
     const transcript = groqResult?.text || '';
@@ -450,16 +586,10 @@ async function processMeeting(job) {
     let labeledSegments;
 
     if (perDeviceAudio && perDeviceAudio.length > 0) {
-      // PATH A: Per-device timeline + VAD scores
-      // VAD tells us who was actually speaking in each 10s window.
-      // With earphones this is reliable — clear signal separation per device.
       logger.info('Assigning speakers via per-device timeline + VAD');
       labeledSegments = await assignSpeakersFromDeviceTimeline(rawSegments, perDeviceAudio);
       meeting.speakerDiarizationMethod = 'per-device-vad';
     } else {
-      // PATH B: No per-device data — pyannote → LLM fallback
-      // This is the path used when meeting is re-analyzed via the Analyze button
-      // without per-device audio (e.g. manually uploaded recordings).
       logger.info('No per-device audio — falling back to pyannote/LLM');
 
       const joinedAttendees = meeting.attendees.filter(a => a.attended === true || a.joinedAt !== null);
@@ -470,7 +600,12 @@ async function processMeeting(job) {
 
       logger.info(`Attendees for diarization: ${attendeeNames.join(', ')}`);
 
-      const diarSegments = await diarizeWithPyannote(localAudioPath, attendeeNames.length);
+      // FIX 1: pyannote call wrapped in timeout
+      const diarSegments = await runWithTimeout(
+        diarizeWithPyannote(localAudioPath, attendeeNames.length),
+        330000, // 5.5 minutes
+        'Pyannote diarization'
+      ).catch(e => { logger.warn(`Pyannote timed out: ${e.message}`); return null; });
 
       if (diarSegments && diarSegments.length > 0) {
         logger.info(`Using pyannote (${diarSegments.length} segments)`);
@@ -479,7 +614,12 @@ async function processMeeting(job) {
       } else {
         logger.info('Pyannote unavailable — using LLM speaker inference');
         const segmentsToLabel = rawDuration < 600 ? rawSegments : mergeShortSegments(rawSegments);
-        labeledSegments = await inferSpeakersWithLLM(segmentsToLabel, attendeeNames);
+        // FIX 1: LLM inference has a total timeout (individual batches also have one inside inferSpeakersWithLLM)
+        labeledSegments = await runWithTimeout(
+          inferSpeakersWithLLM(segmentsToLabel, attendeeNames),
+          600000, // 10 minutes total for all batches
+          'LLM speaker inference (full)'
+        );
         meeting.speakerDiarizationMethod = 'llm';
       }
     }
@@ -522,15 +662,21 @@ async function processMeeting(job) {
     await updateStep(meetingId, 'analysis', 'running', 'Analyzing meeting content', io);
 
     const promptTemplate = await PromptTemplate.findOne({ domain: meeting.domain, isActive: true });
-    const analysis = await meetingAnalysisChain(
-      meeting.transcriptRaw,
-      meeting.domain,
-      meeting.attendees.map(a => a.user),
-      promptTemplate || {
-        systemPrompt: 'You are a meeting analyst. Analyze the meeting transcript and return structured insights.',
-        userPromptTemplate: 'Analyze this {domain} meeting transcript:\n\n{transcript}\n\nAttendees: {attendees}\n\nReturn JSON with: summary, conclusions, decisions, actionItems (array with owner/task/deadline fields), followUpTopics, attendeeContributions (array with name/score/keyPoints fields)'
-      },
-      meeting.transcriptSegments
+
+    // FIX 1: meetingAnalysisChain wrapped in timeout
+    const analysis = await runWithTimeout(
+      meetingAnalysisChain(
+        meeting.transcriptRaw,
+        meeting.domain,
+        meeting.attendees.map(a => a.user),
+        promptTemplate || {
+          systemPrompt: 'You are a meeting analyst. Analyze the meeting transcript and return structured insights.',
+          userPromptTemplate: 'Analyze this {domain} meeting transcript:\n\n{transcript}\n\nAttendees: {attendees}\n\nReturn JSON with: summary, conclusions, decisions, actionItems (array with owner/task/deadline fields), followUpTopics, attendeeContributions (array with name/score/keyPoints fields)'
+        },
+        meeting.transcriptSegments
+      ),
+      180000, // 3 minutes
+      'Meeting analysis LLM chain'
     );
 
     meeting.summary = analysis.summary;
@@ -554,7 +700,12 @@ async function processMeeting(job) {
     for (const attendee of meeting.attendees) {
       const name = `${attendee.user?.firstName} ${attendee.user?.lastName}`.trim();
       try {
-        const contribution = await scoreAttendeeChain(name, meeting.transcriptRaw, meeting.domain, meeting.transcriptSegments);
+        // FIX 1: each attendee scoring call wrapped in timeout
+        const contribution = await runWithTimeout(
+          scoreAttendeeChain(name, meeting.transcriptRaw, meeting.domain, meeting.transcriptSegments),
+          120000, // 2 minutes per attendee
+          `Score attendee ${name}`
+        );
         const score = (contribution.score && !isNaN(contribution.score)) ? contribution.score : 5;
         attendee.contributionScore = score;
         attendee.keyPoints = contribution.keyPoints || [];
@@ -648,6 +799,17 @@ async function processMeeting(job) {
 
   } catch (error) {
     logger.error(`Processing error for meeting ${meetingId}: ${error.message}`);
+
+    // FIX 1: Broadcast failure to the client so the UI shows 'failed'
+    // instead of staying stuck on 'processing' indefinitely.
+    if (io) {
+      io.to(meetingId).emit('processing-update', {
+        step: 'failed',
+        status: 'failed',
+        message: error.message,
+      });
+    }
+
     try {
       await Meeting.findByIdAndUpdate(meetingId, {
         status: 'completed',
@@ -657,9 +819,7 @@ async function processMeeting(job) {
     } catch (updateError) { logger.error(`Failed to update meeting status: ${updateError.message}`); }
     throw error;
   } finally {
-    // FIX: Ensure cleanup happens on ALL paths (success or error)
     if (localAudioPath) { try { fs.unlinkSync(localAudioPath); } catch (_) {} }
-    // Cleanup any split chunks that weren't cleaned during processing
     for (const chunk of splitChunks) { try { fs.unlinkSync(chunk); } catch (_) {} }
   }
 }

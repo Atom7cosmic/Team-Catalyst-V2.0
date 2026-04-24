@@ -154,7 +154,7 @@ const transcriptQueue = new Map();
 const flushedDeviceAudio = new Map(); // Map<meetingId, Map<userId, deviceEntry>>
 const roomParticipants = new Map();
 const rooms = new Map();
-const { uploadFile } = require('./config/s3');
+const { uploadFile, listFiles } = require('./config/s3');
 const CHUNK_DURATION_MS = 10000;
 
 io.use(async (socket, next) => {

@@ -13,11 +13,17 @@ const logger = winston.createLogger({
   transports: [new winston.transports.Console()]
 });
 
+// FIX 1: Add timeout to the ChatGroq constructor so every llm.invoke() call
+// is bounded. Without this, a single hung Groq API call can stall the worker
+// indefinitely — the BullMQ job never throws, the worker never retries, and
+// the meeting stays stuck in 'processing' forever.
+// 120s covers the largest typical analysis payloads comfortably.
 const llm = new ChatGroq({
   apiKey: process.env.GROQ_API_KEY,
   model: 'llama-3.3-70b-versatile',
   temperature: 0.2,
-  maxTokens: 4096
+  maxTokens: 4096,
+  timeout: 120000, // 2 minutes — applies to every llm.invoke() call on this instance
 });
 
 function buildSegmentTranscript(transcriptSegments, maxChars = 40000) {
@@ -44,6 +50,8 @@ const meetingAnalysisChain = async (transcript, domain, attendees, promptTemplat
       .replace('{domain}', domain)
       .replace('{date}', new Date().toISOString());
 
+    // FIX 1: llm.invoke is now bounded by the 120s timeout set on the
+    // constructor above. No need to wrap each call site individually.
     const response = await llm.invoke([
       ['system', promptTemplate.systemPrompt],
       ['human', userMessage]
@@ -148,13 +156,6 @@ Be concise and professional.`],
     ]);
 
     const chain = prompt.pipe(llm).pipe(new StringOutputParser());
-
-    // ✅ FIX: Removed .replace(/\{/g, '{{').replace(/\}/g, '}}') from transcript content.
-    // Those replacements corrupted any JSON objects, code snippets, or curly-brace text
-    // in transcripts (e.g. "{action: deploy}" became "{{action: deploy}}").
-    // LangChain handles variable substitution safely via invoke() — the transcript value
-    // is passed as a named variable, NOT interpolated into a template string, so no
-    // escaping of braces is needed or wanted.
     return await chain.invoke({
       transcript: transcript.substring(0, 10000)
     });
@@ -184,7 +185,7 @@ const scoreAttendeeChain = async (attendeeName, transcript, domain, transcriptSe
 
       const substantiveSegments = attendeeSegments.filter(seg => {
         const text = seg.text.trim().toLowerCase();
-        const fillerWords = ['okay', 'ok', 'yes', 'yeah', 'sure', 'hmm', 'start', 'hi', 'hello', 'bye', 'thanks', 'thank you', 'alright', 'right', 'good', 'great','thank you for watching!'];
+        const fillerWords = ['okay', 'ok', 'yes', 'yeah', 'sure', 'hmm', 'start', 'hi', 'hello', 'bye', 'thanks', 'thank you', 'alright', 'right', 'good', 'great', 'thank you for watching!'];
         return text.split(' ').length > 3 && !fillerWords.includes(text.replace(/[^a-z]/g, ''));
       });
 
@@ -207,6 +208,7 @@ Attendee to score: ${attendeeName}
 
 ${formattedTranscript}`;
 
+    // FIX 1: scoreAttendeeChain llm.invoke is bounded by the 120s constructor timeout.
     const response = await llm.invoke([
       ['system', `You are a senior corporate performance analyst evaluating meeting participation.
 

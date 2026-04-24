@@ -20,6 +20,78 @@ try {
   logger.error(`Failed to initialize meeting queue: ${error.message}`);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// FIX 1: Stale processing detector
+//
+// If a meeting has been stuck in 'processing' for more than 15 minutes it
+// means the worker silently stalled (LLM hung, container OOM-killed, etc.)
+// and never threw — so BullMQ never retried and the meeting never recovered.
+//
+// This interval runs every 5 minutes on the controller process and auto-fails
+// any meeting that has been processing for >15 minutes, marking it with a
+// clear error message so the user can click "Analyze Meeting" to retry.
+// ─────────────────────────────────────────────────────────────────────────────
+const STALE_PROCESSING_THRESHOLD_MS = 15 * 60 * 1000; // 15 minutes
+const STALE_CHECK_INTERVAL_MS = 5 * 60 * 1000;        // check every 5 minutes
+
+async function detectAndFailStaleMeetings() {
+  try {
+    const cutoff = new Date(Date.now() - STALE_PROCESSING_THRESHOLD_MS);
+    const staleMeetings = await Meeting.find({
+      status: 'processing',
+      updatedAt: { $lt: cutoff },
+    }).select('_id name updatedAt');
+
+    if (staleMeetings.length === 0) return;
+
+    logger.warn(`Stale processing detector: found ${staleMeetings.length} stuck meeting(s)`);
+
+    for (const meeting of staleMeetings) {
+      const stuckMinutes = Math.round((Date.now() - meeting.updatedAt) / 60000);
+      logger.warn(`  → Meeting ${meeting._id} ("${meeting.name}") stuck for ${stuckMinutes} minutes — auto-failing`);
+
+      await Meeting.findByIdAndUpdate(meeting._id, {
+        status: 'completed',
+        processingError: `Processing timed out after ${stuckMinutes} minutes. Click "Analyze Meeting" to retry.`,
+        $set: { 'processingSteps.$[elem].status': 'failed' },
+      }, { arrayFilters: [{ 'elem.status': { $in: ['running', 'pending'] } }] });
+
+      // Notify the host so they know to retry
+      try {
+        await Notification.create({
+          user: meeting.host,
+          type: 'meeting_processing_failed',
+          title: 'Meeting processing failed',
+          message: `"${meeting.name}" processing timed out. Click Analyze Meeting to retry.`,
+          link: `/meetings/${meeting._id}`,
+          entityType: 'meeting',
+          entityId: meeting._id,
+        });
+      } catch (notifErr) {
+        logger.warn(`Failed to create stale-meeting notification: ${notifErr.message}`);
+      }
+
+      // Broadcast failure to any client still watching the processing page
+      const io = global.io;
+      if (io) {
+        io.to(meeting._id.toString()).emit('processing-update', {
+          step: 'failed',
+          status: 'failed',
+          message: `Processing timed out after ${stuckMinutes} minutes. Please retry.`,
+        });
+      }
+    }
+  } catch (e) {
+    logger.error(`Stale processing detector error: ${e.message}`);
+  }
+}
+
+// Start the stale detector when the controller module is loaded
+setInterval(detectAndFailStaleMeetings, STALE_CHECK_INTERVAL_MS);
+// Also run once on startup to catch meetings that were stuck when the server
+// last restarted
+detectAndFailStaleMeetings();
+
 exports.createMeeting = async (req, res) => {
   try {
     const { name, description, scheduledDate, estimatedDuration, domain, agenda, externalLink, attendees } = req.body;
@@ -181,19 +253,23 @@ exports.uploadRecording = async (req, res) => {
     const key = `meetings/${id}/recording-${Date.now()}.webm`;
     await uploadFile(key, req.file.buffer, req.file.mimetype);
 
-    let perDeviceAudio = null;
+    // NOTE: perDeviceAudio from client is intentionally NOT stored or passed to
+    // the job anymore. The worker now scans S3 directly via scanPerDeviceAudio()
+    // at job execution time, which is more reliable (see meetingProcessor.js FIX 3).
+    // We still parse it here for logging purposes only.
     try {
       if (req.body.perDeviceAudio) {
-        perDeviceAudio = typeof req.body.perDeviceAudio === 'string' ? JSON.parse(req.body.perDeviceAudio) : req.body.perDeviceAudio;
-        logger.info(`Per-device audio received for ${perDeviceAudio.length} participants`);
+        const parsed = typeof req.body.perDeviceAudio === 'string'
+          ? JSON.parse(req.body.perDeviceAudio)
+          : req.body.perDeviceAudio;
+        logger.info(`Per-device audio received for ${parsed.length} participants (will be re-scanned from S3 by worker)`);
       }
-    } catch (e) { logger.warn(`Failed to parse perDeviceAudio: ${e.message}`); }
+    } catch (e) { logger.warn(`Failed to parse perDeviceAudio for logging: ${e.message}`); }
 
     meeting.recordingUrl = key;
     meeting.recordingSource = 'room';
     meeting.status = 'completed';
     meeting.processingSteps.forEach(step => { if (step.step === 'upload') { step.status = 'done'; step.timestamp = new Date(); } });
-    if (perDeviceAudio && perDeviceAudio.length > 0) meeting.perDeviceAudioKeys = perDeviceAudio;
     await meeting.save();
 
     res.json({ success: true, message: 'Recording saved. Click "Analyze Meeting" to start AI processing.', meeting });
@@ -203,23 +279,6 @@ exports.uploadRecording = async (req, res) => {
   }
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// ANALYZE MEETING — manual trigger button
-//
-// Allows the host or any attendee to (re)trigger AI analysis on a meeting
-// that has already been recorded. This is the "Analyze Meeting" button.
-//
-// Uses the meeting's stored recordingUrl (audioKey) and perDeviceAudioKeys
-// (if available) to requeue the job exactly as the automatic pipeline would.
-//
-// When to use:
-//   - After a meeting ended but auto-processing failed
-//   - To rerun analysis with updated AI models/prompts
-//   - When the host wants to trigger analysis manually instead of automatically
-//
-// The worker resets processingSteps at the start of each run so the UI
-// shows fresh progress bars regardless of previous state.
-// ─────────────────────────────────────────────────────────────────────────────
 exports.analyzeMeeting = async (req, res) => {
   try {
     const { id } = req.params;
@@ -245,7 +304,6 @@ exports.analyzeMeeting = async (req, res) => {
       return res.status(503).json({ success: false, message: 'Processing queue unavailable. Please try again later.' });
     }
 
-    // Set status to processing so the UI shows progress
     meeting.status = 'processing';
     meeting.processingError = null;
     meeting.processingSteps = [
@@ -258,18 +316,20 @@ exports.analyzeMeeting = async (req, res) => {
     ];
     await meeting.save();
 
-    // Build job data — include perDeviceAudioKeys if available from original recording
-    const jobData = {
+    // FIX 3: Job data no longer includes perDeviceAudio — the worker scans S3
+    // directly. We only pass the audioKey (mixed recording) and meetingId.
+    //
+    // FIX 3: Add a 30s delay before the job starts so that all participants'
+    // flush-my-chunks S3 uploads have time to complete before the worker runs
+    // scanPerDeviceAudio(). In testing, all uploads finish within ~5s, so 30s
+    // is a comfortable buffer even on slow connections.
+    const job = await meetingQueue.add('process-meeting', {
       meetingId: id,
       audioKey: meeting.recordingUrl,
-      ...(meeting.perDeviceAudioKeys && meeting.perDeviceAudioKeys.length > 0
-        ? { perDeviceAudio: meeting.perDeviceAudioKeys }
-        : {})
-    };
-
-    const job = await meetingQueue.add('process-meeting', jobData, {
+    }, {
       attempts: 3,
-      backoff: { type: 'exponential', delay: 5000 }
+      backoff: { type: 'exponential', delay: 5000 },
+      delay: 30000, // FIX 3: wait 30s for S3 uploads to complete before worker starts
     });
 
     logger.info(`Analyze Meeting job ${job.id} queued for meeting ${id} by user ${req.user.userId}`);
@@ -325,6 +385,7 @@ exports.manualUpload = async (req, res) => {
     await meeting.save();
 
     if (meetingQueue) {
+      // Manual uploads have no per-device audio so no delay needed
       await meetingQueue.add('process-meeting', { meetingId: meeting._id.toString(), audioKey: key }, { attempts: 3, backoff: { type: 'exponential', delay: 5000 } });
     }
 

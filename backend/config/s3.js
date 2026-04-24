@@ -1,4 +1,4 @@
-const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, ListObjectsV2Command } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const winston = require('winston');
 
@@ -68,9 +68,48 @@ const deleteFile = async (key) => {
   }
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// listFiles — lists all S3 keys under a given prefix.
+//
+// Used by meetingProcessor.js scanPerDeviceAudio() to discover all
+// device-* chunk files that participants uploaded, regardless of whether
+// the client sent a complete perDeviceAudio array at upload-recording time.
+//
+// Handles S3 pagination automatically — buckets with >1000 objects under
+// a prefix are fully traversed.
+// ─────────────────────────────────────────────────────────────────────────────
+const listFiles = async (prefix) => {
+  try {
+    const keys = [];
+    let continuationToken = undefined;
+
+    do {
+      const command = new ListObjectsV2Command({
+        Bucket: process.env.AWS_S3_BUCKET,
+        Prefix: prefix,
+        ...(continuationToken ? { ContinuationToken: continuationToken } : {}),
+      });
+
+      const response = await s3Client.send(command);
+
+      for (const obj of response.Contents || []) {
+        if (obj.Key) keys.push(obj.Key);
+      }
+
+      continuationToken = response.IsTruncated ? response.NextContinuationToken : undefined;
+    } while (continuationToken);
+
+    return keys;
+  } catch (error) {
+    logger.error(`Error listing files with prefix "${prefix}": ${error.message}`);
+    throw error;
+  }
+};
+
 module.exports = {
   s3Client,
   uploadFile,
   getFileUrl,
-  deleteFile
+  deleteFile,
+  listFiles,
 };
