@@ -496,6 +496,82 @@ async function assignSpeakersFromDeviceTimeline(segments, perDeviceAudio) {
   });
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// HYBRID: mapPyannoteToVadIdentities
+//
+// Uses Pyannote diarization for millisecond-accurate speaker BOUNDARIES and
+// per-device VAD sidecars to map anonymous labels (SPEAKER_00) to real names.
+//
+// This gives the best of both worlds:
+//   • Pyannote: detects the exact second a speaker switches (handles rapid dialogue)
+//   • VAD sidecar: knows which device (person) was active in each time window
+//
+// Algorithm:
+//   For each Pyannote anonymous segment, accumulate VAD-weighted overlap scores
+//   for every participant. The participant with the highest score wins that label.
+// ─────────────────────────────────────────────────────────────────────────────
+function mapPyannoteToVadIdentities(groqSegments, pyannoteSegments, perDeviceAudio) {
+  const CHUNK_MS = 10000;
+  const recordingStartTimes = perDeviceAudio
+    .map(d => d.recordingStartTime).filter(t => t && t > 0 && t < Date.now());
+  const allChunkTs = perDeviceAudio
+    .flatMap(d => (d.chunks || []).map(c => c.timestamp)).filter(t => t && t > 0);
+  const meetingEpoch = recordingStartTimes.length > 0
+    ? Math.min(...recordingStartTimes)
+    : allChunkTs.length > 0 ? Math.min(...allChunkTs) - CHUNK_MS : Date.now() - 300000;
+
+  // Build per-participant time windows (seconds since meetingEpoch)
+  const windows = [];
+  for (const device of perDeviceAudio) {
+    for (const chunk of device.chunks || []) {
+      const windowEnd   = (chunk.timestamp - meetingEpoch) / 1000;
+      const windowStart = windowEnd - CHUNK_MS / 1000;
+      windows.push({ userName: device.userName, windowStart, windowEnd, voiceRatio: chunk.voiceRatio ?? 0.5 });
+    }
+  }
+
+  // Accumulate VAD-weighted overlap between each Pyannote anonymous speaker and each participant
+  const speakerScores = {}; // { 'SPEAKER_00': { 'Alice CEO': 12.4, 'Bob CTO': 3.1 }, ... }
+  for (const pSeg of pyannoteSegments) {
+    if (!speakerScores[pSeg.speaker]) speakerScores[pSeg.speaker] = {};
+    for (const w of windows) {
+      const overlapStart = Math.max(pSeg.start, w.windowStart);
+      const overlapEnd   = Math.min(pSeg.end,   w.windowEnd);
+      if (overlapEnd <= overlapStart) continue;
+      const overlapSecs = overlapEnd - overlapStart;
+      speakerScores[pSeg.speaker][w.userName] =
+        (speakerScores[pSeg.speaker][w.userName] || 0) + w.voiceRatio * overlapSecs;
+    }
+  }
+
+  // Greedily assign each anonymous speaker to the highest-scoring participant
+  const assigned = new Set();
+  const speakerMap = {};
+  // Sort anonymous speakers by confidence (highest total score first)
+  const sortedPSpeakers = Object.entries(speakerScores).sort((a, b) => {
+    const aMax = Math.max(...Object.values(a[1]), 0);
+    const bMax = Math.max(...Object.values(b[1]), 0);
+    return bMax - aMax;
+  });
+  for (const [pSpeaker, userScores] of sortedPSpeakers) {
+    const sorted = Object.entries(userScores).sort((a, b) => b[1] - a[1]);
+    const best = sorted.find(([name]) => !assigned.has(name));
+    if (best) { speakerMap[pSpeaker] = best[0]; assigned.add(best[0]); }
+    else speakerMap[pSpeaker] = perDeviceAudio[0]?.userName || 'Unknown';
+  }
+
+  logger.info(`Pyannote→VAD identity map: ${JSON.stringify(speakerMap)}`);
+
+  // Assign each Whisper segment using Pyannote boundary → mapped identity
+  return groqSegments.map(seg => {
+    const mid = ((seg.start || 0) + (seg.end || 0)) / 2;
+    const pSeg = pyannoteSegments.find(p => p.start <= mid && mid <= p.end)
+      || pyannoteSegments.reduce((a, b) =>
+          Math.abs((a.start + a.end) / 2 - mid) < Math.abs((b.start + b.end) / 2 - mid) ? a : b, pyannoteSegments[0]);
+    return { ...seg, speaker: speakerMap[pSeg?.speaker] || perDeviceAudio[0]?.userName || 'Unknown' };
+  });
+}
+
 function formatTime(seconds) {
   const mins = Math.floor(seconds / 60);
   const secs = Math.floor(seconds % 60);
@@ -607,48 +683,69 @@ async function processMeeting(job) {
 
     logger.info(`Segments after hallucination filter: ${rawSegments.length}`);
 
-    // ── SPEAKER ASSIGNMENT ────────────────────────────────────────────────
+    // ── SPEAKER ASSIGNMENT ─────────────────────────────────────────────────
+    // Strategy (best accuracy for any meeting type):
+    //
+    //   TIER 1 — Pyannote + VAD (per-device audio available)
+    //     Pyannote → millisecond-accurate anonymous boundaries
+    //     VAD sidecar → maps SPEAKER_XX to real person identity
+    //     Best for: rapid dialogue AND long monologue meetings
+    //
+    //   TIER 2 — VAD timeline only (Pyannote unavailable)
+    //     10s window heuristic, accurate for long turns
+    //
+    //   TIER 3 — Pyannote only (no per-device audio)
+    //     Accurate boundaries, identity matched by speaking-time rank
+    //
+    //   TIER 4 — LLM inference (nothing available)
+    // ──────────────────────────────────────────────────────────────────────
     await updateStep(meetingId, 'diarization', 'running', 'Assigning speakers', io);
 
     let labeledSegments;
 
-    if (perDeviceAudio && perDeviceAudio.length > 0) {
-      logger.info('Assigning speakers via per-device timeline + VAD');
+    const joinedAttendees = meeting.attendees.filter(a => a.attended === true || a.joinedAt !== null);
+    const activeAttendees = joinedAttendees.length > 0 ? joinedAttendees : meeting.attendees;
+    const attendeeNames = activeAttendees
+      .map(a => `${(a.user?.firstName || '').trim()} ${(a.user?.lastName || '').trim()}`.trim())
+      .filter(name => name.length > 0);
+
+    // Always attempt Pyannote — it gives the most accurate segment boundaries
+    logger.info(`Attempting Pyannote diarization (${perDeviceAudio.length > 0 ? 'will map via VAD' : 'identity by speaking time'})`);
+    const diarSegments = await runWithTimeout(
+      diarizeWithPyannote(localAudioPath, attendeeNames.length || perDeviceAudio.length),
+      330000,
+      'Pyannote diarization'
+    ).catch(e => { logger.warn(`Pyannote timed out or failed: ${e.message}`); return null; });
+
+    if (diarSegments && diarSegments.length > 0 && perDeviceAudio.length > 0) {
+      // TIER 1: Pyannote boundaries + VAD identity mapping (best accuracy)
+      logger.info(`TIER 1: Pyannote (${diarSegments.length} segments) + VAD identity mapping`);
+      labeledSegments = mapPyannoteToVadIdentities(rawSegments, diarSegments, perDeviceAudio);
+      meeting.speakerDiarizationMethod = 'pyannote+vad';
+
+    } else if (perDeviceAudio.length > 0) {
+      // TIER 2: Pyannote unavailable — fall back to VAD timeline
+      logger.info('TIER 2: Pyannote unavailable — VAD timeline heuristic');
       labeledSegments = await assignSpeakersFromDeviceTimeline(rawSegments, perDeviceAudio);
       meeting.speakerDiarizationMethod = 'per-device-vad';
+
+    } else if (diarSegments && diarSegments.length > 0) {
+      // TIER 3: No per-device audio — Pyannote with speaking-time identity mapping
+      logger.info(`TIER 3: Pyannote only (${diarSegments.length} segments), identity by speaking time`);
+      labeledSegments = mergeTranscriptWithDiarization(rawSegments, diarSegments, attendeeNames);
+      meeting.speakerDiarizationMethod = 'pyannote';
+
     } else {
-      logger.info('No per-device audio — falling back to pyannote/LLM');
-
-      const joinedAttendees = meeting.attendees.filter(a => a.attended === true || a.joinedAt !== null);
-      const activeAttendees = joinedAttendees.length > 0 ? joinedAttendees : meeting.attendees;
-      const attendeeNames = activeAttendees
-        .map(a => `${(a.user?.firstName || '').trim()} ${(a.user?.lastName || '').trim()}`.trim())
-        .filter(name => name.length > 0);
-
-      logger.info(`Attendees for diarization: ${attendeeNames.join(', ')}`);
-
-      // FIX 1: pyannote call wrapped in timeout
-      const diarSegments = await runWithTimeout(
-        diarizeWithPyannote(localAudioPath, attendeeNames.length),
-        330000, // 5.5 minutes
-        'Pyannote diarization'
-      ).catch(e => { logger.warn(`Pyannote timed out: ${e.message}`); return null; });
-
-      if (diarSegments && diarSegments.length > 0) {
-        logger.info(`Using pyannote (${diarSegments.length} segments)`);
-        labeledSegments = mergeTranscriptWithDiarization(rawSegments, diarSegments, attendeeNames);
-        meeting.speakerDiarizationMethod = 'pyannote';
-      } else {
-        logger.info('Pyannote unavailable — using LLM speaker inference');
-        const segmentsToLabel = rawDuration < 600 ? rawSegments : mergeShortSegments(rawSegments);
-        // FIX 1: LLM inference has a total timeout (individual batches also have one inside inferSpeakersWithLLM)
-        labeledSegments = await runWithTimeout(
-          inferSpeakersWithLLM(segmentsToLabel, attendeeNames),
-          600000, // 10 minutes total for all batches
-          'LLM speaker inference (full)'
-        );
-        meeting.speakerDiarizationMethod = 'llm';
-      }
+      // TIER 4: Nothing available — LLM inference
+      logger.info('TIER 4: No diarization available — LLM speaker inference');
+      logger.info(`Attendees for LLM inference: ${attendeeNames.join(', ')}`);
+      const segmentsToLabel = rawDuration < 600 ? rawSegments : mergeShortSegments(rawSegments);
+      labeledSegments = await runWithTimeout(
+        inferSpeakersWithLLM(segmentsToLabel, attendeeNames),
+        600000,
+        'LLM speaker inference (full)'
+      );
+      meeting.speakerDiarizationMethod = 'llm';
     }
 
     // Deduplication

@@ -45,6 +45,15 @@ export default function MeetingDetailPage({ params }) {
     'text-yellow-400', 'text-pink-400', 'text-cyan-400',
   ];
 
+  // Seed transcriptSegments from the meeting data whenever it loads/refreshes.
+  // Guard: only overwrite if the user hasn't started editing locally, so manual
+  // speaker corrections aren't reset by a background refetch.
+  useEffect(() => {
+    if (meeting?.transcriptSegments?.length > 0 && !transcriptHasChanges) {
+      setTranscriptSegments(meeting.transcriptSegments);
+    }
+  }, [meeting?.transcriptSegments]);
+
   // Handle processing status fallback (WebSocket handles the real-time updates)
   useEffect(() => {
     if (meeting?.status === 'processing') {
