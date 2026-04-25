@@ -39,6 +39,7 @@ export default function MeetingDetailPage({ params }) {
   const [transcriptHasChanges, setTranscriptHasChanges] = useState(false);
   const [isSavingTranscript, setIsSavingTranscript] = useState(false);
   const [cooldownRemaining, setCooldownRemaining] = useState(0);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
 
   const SPEAKER_COLORS = [
     'text-blue-400', 'text-green-400', 'text-purple-400',
@@ -492,7 +493,10 @@ export default function MeetingDetailPage({ params }) {
                     </div>
                   ) : (
                     <Button
+                      disabled={isAnalyzing}
                       onClick={async () => {
+                        if (isAnalyzing) return; // double-click guard
+                        setIsAnalyzing(true);
                         try {
                           toast.loading('Starting analysis...', { id: 'analyze' });
                           await api.post(`/meetings/${meeting._id}/analyze`);
@@ -500,11 +504,13 @@ export default function MeetingDetailPage({ params }) {
                           refetch();
                         } catch (error) {
                           toast.error(error?.response?.data?.message || 'Failed to start analysis', { id: 'analyze' });
+                        } finally {
+                          setIsAnalyzing(false);
                         }
                       }}
-                      className="w-full sm:w-auto bg-purple-600 hover:bg-purple-700 text-white shadow-lg shadow-purple-500/20 analyze-ready transition-all"
+                      className="w-full sm:w-auto bg-purple-600 hover:bg-purple-700 disabled:opacity-60 disabled:cursor-not-allowed text-white shadow-lg shadow-purple-500/20 analyze-ready transition-all"
                     >
-                      ✨ Analyze Meeting
+                      {isAnalyzing ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Starting...</> : <>✨ Analyze Meeting</>}
                     </Button>
                   )}
                 </>

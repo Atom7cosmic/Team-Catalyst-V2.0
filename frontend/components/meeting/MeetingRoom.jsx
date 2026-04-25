@@ -377,7 +377,14 @@ export default function MeetingRoom({ meetingId, user, meetingName }) {
       recorder.ondataavailable = e => {
         if (e.data.size > 0) {
           if (!initSegmentRef.current) {
+            // P1 FIX (initSegment logic): Store blob1 as the init segment header
+            // but do NOT push it into myChunksRef. Previously blob1 was both
+            // stored as initSegment AND pushed to the chunks array, so the first
+            // 1s of audio was duplicated in every subsequent chunk (prepended as
+            // 'header' + present in normal audio data). Now blob1 is only the
+            // prepended header; actual audio starts from blob2 onward.
             initSegmentRef.current = e.data;
+            return; // skip pushing to myChunksRef
           }
           myChunksRef.current.push(e.data);
         }
@@ -386,7 +393,9 @@ export default function MeetingRoom({ meetingId, user, meetingName }) {
         if (!myChunksRef.current.length) return;
         const chunks = [...myChunksRef.current];
         myChunksRef.current = [];
-        const blobChunks = (initSegmentRef.current && chunks[0] !== initSegmentRef.current)
+        // P1 FIX: blobChunks always prepends initSegment (since blob1 is no
+        // longer in myChunksRef, there's no duplication risk here).
+        const blobChunks = initSegmentRef.current
           ? [initSegmentRef.current, ...chunks]
           : chunks;
         const blob = new Blob(blobChunks, { type: mimeType });
@@ -407,10 +416,13 @@ export default function MeetingRoom({ meetingId, user, meetingName }) {
 
   const stopMyRecording = useCallback(async () => {
     if (chunkIntervalRef.current) { clearInterval(chunkIntervalRef.current); chunkIntervalRef.current = null; }
-    if (myChunksRef.current.length > 0 && myRecorderRef.current) {
+    // P1 FIX: Guard now also fires when initSegment exists but myChunksRef is
+    // empty (recording stopped < 1s after start — only the init blob arrived).
+    const hasChunks = myChunksRef.current.length > 0 || initSegmentRef.current;
+    if (hasChunks && myRecorderRef.current) {
       const mimeType = myRecorderRef.current.mimeType || 'audio/webm';
       const blob = new Blob(
-        (initSegmentRef.current && myChunksRef.current[0] !== initSegmentRef.current)
+        initSegmentRef.current
           ? [initSegmentRef.current, ...myChunksRef.current]
           : myChunksRef.current,
         { type: mimeType }

@@ -286,14 +286,21 @@ io.on('connection', (socket) => {
       logger.info(`flush-my-chunks S3 confirmed for ${displayName}: ${uploadedChunks.length} chunks — scoring VAD in background`);
 
       try {
-        for (let i = 0; i < myChunks.length; i++) {
-          const voiceRatio = await getVadScore(myChunks[i].audioBuffer, `${socket.userId}-chunk${myChunks[i].chunkIndex}.webm`);
+        // P0 FIX: Run VAD scoring in parallel (not serially) so total time is
+        // bounded by a single /vad-score call (~1–3s) regardless of chunk count.
+        // Serial scoring took 10s × N chunks — a 30-min meeting had 180 chunks
+        // = 1800s, far exceeding the BullMQ 30s delay, so the sidecar was never
+        // ready when the worker scanned S3.
+        const vadResults = await Promise.all(
+          myChunks.map(c => getVadScore(c.audioBuffer, `${socket.userId}-chunk${c.chunkIndex}.webm`))
+        );
+        vadResults.forEach((voiceRatio, i) => {
           uploadedChunks[i].voiceRatio = voiceRatio;
           uploadedChunks[i].hasVoice = voiceRatio > 0.15;
           logger.info(`  chunk ${myChunks[i].chunkIndex} ${displayName}: voiceRatio=${voiceRatio.toFixed(3)}`);
-        }
+        });
         meetingFlushed.set(socket.userId, { userId: socket.userId, userName: displayName, recordingStartTime: earliestStartTime, chunks: uploadedChunks, audioKey: uploadedChunks[0]?.audioKey, _vadComplete: true });
-        logger.info(`VAD scoring complete for ${displayName} in meeting ${meetingId}`);
+        logger.info(`VAD scoring complete for ${displayName} in meeting ${meetingId} (${myChunks.length} chunks parallel)`);
 
         try {
           const vadKey = `meetings/${meetingId}/device-${socket.userId}-vad.json`;

@@ -347,7 +347,8 @@ async function scanPerDeviceAudio(meetingId) {
       // Skip VAD sidecar files (device-{userId}-vad.json) — handled separately below
       if (basename.endsWith('-vad.json')) continue;
       // e.g. device-69d24b6fe3d5b5709b11c5fe-chunk4-1777011360394.webm
-      const match = basename.match(/^device-([^-]+(?:-[^-]+)*)-chunk(\d+)-(\d+)\.webm$/);
+      // Anchor from the right so userId can contain hyphens (UUIDs, etc.)
+      const match = basename.match(/^device-(.+)-chunk(\d+)-(\d+)\.webm$/);
       if (!match) {
         logger.warn(`scanPerDeviceAudio: unrecognised key format: ${basename}`);
         continue;
@@ -412,7 +413,7 @@ function resolveUserNames(deviceEntries, meeting) {
   const userMap = {};
   for (const attendee of meeting.attendees) {
     const uid = attendee.user?._id?.toString() || attendee.user?.toString();
-    const name = `${attendee.user?.firstName || ''}  ${attendee.user?.lastName || ''}`.trim();
+    const name = `${attendee.user?.firstName || ''} ${attendee.user?.lastName || ''}`.trim().replace(/\s+/g, ' ');
     if (uid && name) userMap[uid] = name;
   }
   return deviceEntries.map(entry => ({
@@ -477,7 +478,10 @@ async function assignSpeakersFromDeviceTimeline(segments, perDeviceAudio) {
       if (windows.length === 0) {
         assignedName = perDeviceAudio[0]?.userName || 'Unknown';
       } else {
-        const nearest = windows.reduce((a, b) => Math.abs(a.windowEnd - midpoint) < Math.abs(b.windowEnd - midpoint) ? a : b);
+        // Use window center for nearest-match to avoid bias toward early/late windows
+        const nearest = windows.reduce((a, b) =>
+          Math.abs((a.windowStart + a.windowEnd) / 2 - midpoint) < Math.abs((b.windowStart + b.windowEnd) / 2 - midpoint) ? a : b
+        );
         assignedName = nearest.userName;
       }
     } else if (covering.length === 1) {
@@ -552,9 +556,10 @@ function mapPyannoteToVadIdentities(groqSegments, pyannoteSegments, perDeviceAud
   const assigned = new Set();
   const speakerMap = {};
   // Sort anonymous speakers by confidence (highest total score first)
+  // Use reduce instead of spread to avoid call-stack overflow with large arrays
   const sortedPSpeakers = Object.entries(speakerScores).sort((a, b) => {
-    const aMax = Math.max(...Object.values(a[1]), 0);
-    const bMax = Math.max(...Object.values(b[1]), 0);
+    const aMax = Object.values(a[1]).reduce((m, v) => Math.max(m, v), 0);
+    const bMax = Object.values(b[1]).reduce((m, v) => Math.max(m, v), 0);
     return bMax - aMax;
   });
   for (const [pSpeaker, userScores] of sortedPSpeakers) {
@@ -698,6 +703,19 @@ async function processMeeting(job) {
 
     logger.info(`Segments after hallucination filter: ${rawSegments.length}`);
 
+    // Guard: no speech detected (silent audio or 100% hallucination wipeout)
+    if (rawSegments.length === 0) {
+      logger.warn(`Meeting ${meetingId}: zero transcript segments — no speech detected`);
+      await Meeting.findByIdAndUpdate(meetingId, {
+        status: 'completed',
+        processingError: 'No speech detected in the recording. Please check microphone permissions and try again.',
+        transcriptRaw: '',
+        transcriptSegments: [],
+      });
+      if (io) io.to(meetingId).emit('processing-update', { step: 'failed', status: 'failed', message: 'No speech detected in recording.' });
+      return; // clean exit — do not throw (job counts as succeeded)
+    }
+
     // ── SPEAKER ASSIGNMENT ─────────────────────────────────────────────────
     // Strategy (best accuracy for any meeting type):
     //
@@ -835,14 +853,19 @@ async function processMeeting(job) {
       };
     });
 
+    // P1 FIX (sequential scoring): The old serial for-loop scored attendees one
+    // at a time — 10 attendees × 2-min timeout = 20 min max in Step 4 alone.
+    // We now run scoring in parallel batches of 3, capping total time at
+    // ceil(N/3) × 120s = ~4 min for 10 attendees.
+    const SCORE_CONCURRENCY = 3;
     meeting.attendeeContributions = [];
-    for (const attendee of meeting.attendees) {
-      const name = `${attendee.user?.firstName} ${attendee.user?.lastName}`.trim();
+
+    const scoreOneAttendee = async (attendee) => {
+      const name = `${attendee.user?.firstName || ''} ${attendee.user?.lastName || ''}`.trim().replace(/\s+/g, ' ');
       try {
-        // FIX 1: each attendee scoring call wrapped in timeout
         const contribution = await runWithTimeout(
           scoreAttendeeChain(name, meeting.transcriptRaw, meeting.domain, meeting.transcriptSegments),
-          120000, // 2 minutes per attendee
+          120000,
           `Score attendee ${name}`
         );
         const score = (contribution.score && !isNaN(contribution.score)) ? contribution.score : 5;
@@ -853,6 +876,10 @@ async function processMeeting(job) {
         logger.warn(`Score failed for ${name}: ${e.message}`);
         meeting.attendeeContributions.push({ user: attendee.user._id, name, score: 5, keyPoints: [], speakingTime: 0 });
       }
+    };
+
+    for (let i = 0; i < meeting.attendees.length; i += SCORE_CONCURRENCY) {
+      await Promise.all(meeting.attendees.slice(i, i + SCORE_CONCURRENCY).map(scoreOneAttendee));
     }
 
     await updateStep(meetingId, 'analysis', 'done', 'Analysis complete', io);
@@ -973,7 +1000,9 @@ const worker = new Worker('meeting-processing', processMeeting, {
 worker.on('completed', (job) => logger.info(`Job ${job.id} completed`));
 worker.on('failed', (job, err) => logger.error(`Job ${job.id} failed: ${err.message}`));
 
-const KEEP_ALIVE_INTERVAL = 10 * 60 * 1000;
+// 4 min — HuggingFace free-tier Spaces sleep after ~5 min idle, so we must
+// ping more frequently than that to keep the pipeline warm.
+const KEEP_ALIVE_INTERVAL = 4 * 60 * 1000;
 
 async function pingDiarizationService() {
   try {

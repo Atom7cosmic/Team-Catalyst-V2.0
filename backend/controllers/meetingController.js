@@ -296,8 +296,13 @@ exports.analyzeMeeting = async (req, res) => {
       return res.status(400).json({ success: false, message: 'No recording found for this meeting. Please upload a recording first.' });
     }
 
+    // Server-side duplicate-job guard (P1 fix).
+    // The frontend isAnalyzing state prevents double-clicks within the same tab,
+    // but two tabs or a page refresh mid-countdown can still trigger two concurrent
+    // BullMQ jobs. Setting status='processing' before enqueuing and checking it
+    // here makes this idempotent — the second request gets 409 Conflict.
     if (meeting.status === 'processing') {
-      return res.status(400).json({ success: false, message: 'Meeting is already being processed. Please wait.' });
+      return res.status(409).json({ success: false, message: 'Meeting is already being processed. Please wait for it to complete.' });
     }
 
     if (!meetingQueue) {
