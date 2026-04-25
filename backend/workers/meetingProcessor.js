@@ -104,30 +104,25 @@ function probeFileDuration(filePath) {
 
 async function getAudioDuration(filePath) {
   const duration = await probeFileDuration(filePath);
-  if (duration > 0) return duration;
+  if (duration > 0) return { duration, wavPath: null };
 
-  // Duration was 0 — file may be a WebM with missing metadata.
   const fileSizeMB = fs.statSync(filePath).size / (1024 * 1024);
   logger.warn(`ffprobe returned 0s duration for ${path.basename(filePath)} (${fileSizeMB.toFixed(1)}MB) — converting to WAV to get accurate duration`);
 
-  // Convert to WAV and probe that instead
   let wavPath = null;
   try {
     wavPath = await convertWebmToWav(filePath);
     if (wavPath && wavPath !== filePath) {
       const wavDuration = await probeFileDuration(wavPath);
       logger.info(`WAV fallback duration: ${wavDuration}s`);
-      return wavDuration;
+      // Return wavPath — caller reuses it for transcription, must delete it when done.
+      return { duration: wavDuration, wavPath };
     }
   } catch (e) {
     logger.warn(`WAV fallback duration probe failed: ${e.message}`);
-  } finally {
-    // Clean up the temporary WAV only if it is different from the input
-    if (wavPath && wavPath !== filePath) {
-      try { fs.unlinkSync(wavPath); } catch (_) {}
-    }
+    if (wavPath && wavPath !== filePath) { try { fs.unlinkSync(wavPath); } catch (_) {} }
   }
-  return 0;
+  return { duration: 0, wavPath: null };
 }
 
 async function splitAudio(filePath, chunkDuration = 600) {
@@ -163,16 +158,24 @@ async function convertWebmToWav(inputPath) {
   });
 }
 
-async function transcribeWithGroq(audioPath) {
+// alreadyWavPath: if the caller already has a WAV (from duration probing),
+// pass it here to skip the redundant second WebM→WAV conversion.
+async function transcribeWithGroq(audioPath, alreadyWavPath = null) {
   try {
     let pathToTranscribe = audioPath;
     let tempWav = null;
-    if (audioPath.endsWith('.webm') || audioPath.endsWith('.ogg')) {
+
+    if (alreadyWavPath) {
+      pathToTranscribe = alreadyWavPath;
+      logger.info(`Transcribing (reusing duration-probe WAV): ${pathToTranscribe}`);
+    } else if (audioPath.endsWith('.webm') || audioPath.endsWith('.ogg')) {
       tempWav = await convertWebmToWav(audioPath);
       if (tempWav !== audioPath) pathToTranscribe = tempWav;
+      logger.info(`Transcribing (freshly converted WAV): ${pathToTranscribe}`);
+    } else {
+      logger.info(`Transcribing: ${pathToTranscribe}`);
     }
-    logger.info(`Transcribing: ${pathToTranscribe}`);
-    // FIX 1: Whisper call wrapped in timeout — Groq API can hang on large files
+
     const transcription = await runWithTimeout(
       groq.audio.transcriptions.create({
         file: fs.createReadStream(pathToTranscribe),
@@ -180,9 +183,10 @@ async function transcribeWithGroq(audioPath) {
         response_format: 'verbose_json',
         temperature: 0,
       }),
-      300000, // 5 minutes per chunk
+      300000,
       'Whisper transcription'
     );
+    // Only delete tempWav if WE created it (not the caller's alreadyWavPath)
     if (tempWav && tempWav !== audioPath) { try { fs.unlinkSync(tempWav); } catch (_) {} }
     return transcription;
   } catch (error) {
@@ -589,6 +593,9 @@ async function processMeeting(job) {
 
   let localAudioPath = null;
   let splitChunks = [];
+  // Track the WAV produced during duration probing so we can reuse it for
+  // transcription and clean it up in finally.
+  let durationProbeWavPath = null;
 
   try {
     const meeting = await Meeting.findById(meetingId).populate('attendees.user', 'firstName lastName');
@@ -625,13 +632,16 @@ async function processMeeting(job) {
     logger.info('Transcribing mixed audio');
     localAudioPath = await downloadAudio(audioKey);
 
-    // FIX 2: getAudioDuration now falls back to WAV probe when WebM returns 0
-    const rawDuration = await getAudioDuration(localAudioPath);
+    // getAudioDuration returns { duration, wavPath }.
+    // When wavPath is non-null it is the WAV we converted for probing —
+    // we reuse it in transcribeWithGroq to avoid a second conversion.
+    const { duration: rawDuration, wavPath: probeWav } = await getAudioDuration(localAudioPath);
+    durationProbeWavPath = probeWav; // tracked for cleanup in finally
+
     meeting.actualDuration = (rawDuration && !isNaN(rawDuration)) ? Math.round(rawDuration / 60) : 0;
     const fileSizeMB = fs.statSync(localAudioPath).size / (1024 * 1024);
     logger.info(`Audio duration: ${rawDuration}s (ffprobe), file size: ${fileSizeMB.toFixed(1)}MB`);
 
-    // Warn if duration still 0 after fallback — file may be corrupt
     if (rawDuration === 0 && fileSizeMB > 0.1) {
       logger.warn(`Duration is 0s but file is ${fileSizeMB.toFixed(1)}MB — file may have corrupt headers. Attempting to continue.`);
     }
@@ -640,16 +650,20 @@ async function processMeeting(job) {
 
     if (fileSizeMB > 24 || rawDuration > 600) {
       logger.info('Large file — splitting into 10-minute WAV chunks');
+      // Duration-probe WAV no longer useful for split path — clean up now
+      if (durationProbeWavPath) {
+        try { fs.unlinkSync(durationProbeWavPath); } catch (_) {}
+        durationProbeWavPath = null;
+      }
       const audioChunks = await splitAudio(localAudioPath);
       splitChunks = audioChunks;
       let timeOffset = 0;
       const allSegs = [];
       let fullText = '';
       for (const chunk of audioChunks) {
-        // FIX 1: each chunk transcription has its own timeout
         const r = await runWithTimeout(
           transcribeWithGroq(chunk),
-          360000, // 6 minutes per chunk (includes WAV conversion)
+          360000, // 6 minutes per chunk
           `Whisper chunk ${chunk}`
         );
         fullText += (r?.text || '') + '\n';
@@ -663,12 +677,13 @@ async function processMeeting(job) {
       }
       groqResult = { text: fullText, segments: allSegs };
     } else {
-      // FIX 1: single-file transcription also has a timeout
+      // Pass durationProbeWavPath (may be null) to avoid a second conversion.
       groqResult = await runWithTimeout(
-        transcribeWithGroq(localAudioPath),
+        transcribeWithGroq(localAudioPath, durationProbeWavPath),
         300000, // 5 minutes
         'Whisper transcription (single file)'
       );
+      // transcribeWithGroq does NOT delete alreadyWavPath — cleaned up in finally.
     }
 
     const transcript = groqResult?.text || '';
@@ -944,6 +959,8 @@ async function processMeeting(job) {
     throw error;
   } finally {
     if (localAudioPath) { try { fs.unlinkSync(localAudioPath); } catch (_) {} }
+    // Clean up the duration-probe WAV if it wasn't already consumed above
+    if (durationProbeWavPath) { try { fs.unlinkSync(durationProbeWavPath); } catch (_) {} }
     for (const chunk of splitChunks) { try { fs.unlinkSync(chunk); } catch (_) {} }
   }
 }

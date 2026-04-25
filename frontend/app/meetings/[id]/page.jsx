@@ -462,7 +462,7 @@ export default function MeetingDetailPage({ params }) {
             {['ready', 'completed', 'processing'].includes(meeting.status) && (
               <Button variant="outline" className="border-border text-foreground hover:bg-muted" onClick={() => setActiveTab('summary')}><FileText className="mr-2 h-4 w-4" />View Summary</Button>
             )}
-            
+
             {meeting.status === 'completed' && !isProcessing && (
               meeting.recordingUrl ? (
                 <>
@@ -479,9 +479,9 @@ export default function MeetingDetailPage({ params }) {
                             <circle
                               cx="20" cy="20" r="16" fill="transparent" stroke="currentColor" strokeWidth="4"
                               className="text-purple-400 transition-all duration-1000 ease-linear"
-                              style={{ 
-                                strokeDasharray: 100.5, 
-                                strokeDashoffset: (1 - cooldownRemaining / 60) * 100.5 
+                              style={{
+                                strokeDasharray: 100.5,
+                                strokeDashoffset: (1 - cooldownRemaining / 60) * 100.5
                               }}
                             />
                           </svg>

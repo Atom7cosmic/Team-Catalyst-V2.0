@@ -18,27 +18,16 @@ const connectDB = require('./config/db');
 const { initializeCollections } = require('./config/chroma');
 
 const {
-  authRoutes,
-  userRoutes,
-  meetingRoutes,
-  taskRoutes,
-  sprintRoutes,
-  attendanceRoutes,
-  performanceRoutes,
-  recommendationRoutes,
-  notificationRoutes,
-  auditRoutes,
-  dashboardRoutes,
-  adminRoutes
+  authRoutes, userRoutes, meetingRoutes, taskRoutes, sprintRoutes,
+  attendanceRoutes, performanceRoutes, recommendationRoutes,
+  notificationRoutes, auditRoutes, dashboardRoutes, adminRoutes
 } = require('./routes');
 
 const logger = winston.createLogger({
   level: process.env.LOG_LEVEL || 'info',
   format: winston.format.combine(winston.format.timestamp(), winston.format.json()),
   transports: [
-    new winston.transports.Console({
-      format: winston.format.combine(winston.format.colorize(), winston.format.simple())
-    }),
+    new winston.transports.Console({ format: winston.format.combine(winston.format.colorize(), winston.format.simple()) }),
     new winston.transports.File({ filename: 'logs/error.log', level: 'error' }),
     new winston.transports.File({ filename: 'logs/combined.log' })
   ]
@@ -87,12 +76,8 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(cookieParser());
 app.use(morgan('combined', { stream: { write: message => logger.info(message.trim()) } }));
 
-const generalLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, max: 100,
-  message: { success: false, message: 'Too many requests, please try again later.' }
-});
+const generalLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 100, message: { success: false, message: 'Too many requests, please try again later.' } });
 app.use('/api/', generalLimiter);
-
 const speedLimiter = slowDown({ windowMs: 15 * 60 * 1000, delayAfter: 50, delayMs: 500 });
 
 app.use('/api/auth', authRoutes);
@@ -114,30 +99,12 @@ app.get('/health', (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // VAD scoring helper
-//
-// Sends a single WebM audio chunk to the diarization service's /vad-score
-// endpoint and returns voiceRatio (0.0–1.0).
-//
-// With earphones the signal is clean:
-//   Speaker talking  → voiceRatio ≈ 0.8–1.0
-//   Speaker silent   → voiceRatio ≈ 0.0–0.1
-//
-// Falls back to 0.5 (neutral) if the service is unreachable so the worker
-// falls back to timestamp heuristic rather than crashing.
 // ─────────────────────────────────────────────────────────────────────────────
 async function getVadScore(audioBuffer, filename) {
   try {
     const form = new FormData();
-    form.append('file', audioBuffer, {
-      filename: filename || 'chunk.webm',
-      contentType: 'audio/webm',
-    });
-    const response = await fetch(`${DIARIZATION_URL}/vad-score`, {
-      method: 'POST',
-      body: form,
-      headers: form.getHeaders(),
-      timeout: 10000,
-    });
+    form.append('file', audioBuffer, { filename: filename || 'chunk.webm', contentType: 'audio/webm' });
+    const response = await fetch(`${DIARIZATION_URL}/vad-score`, { method: 'POST', body: form, headers: form.getHeaders(), timeout: 10000 });
     if (!response.ok) { logger.warn(`VAD score failed: ${response.status}`); return 0.5; }
     const result = await response.json();
     return typeof result.voiceRatio === 'number' ? result.voiceRatio : 0.5;
@@ -151,9 +118,26 @@ async function getVadScore(audioBuffer, filename) {
 // In-memory stores
 // ─────────────────────────────────────────────────────────────────────────────
 const transcriptQueue = new Map();
-const flushedDeviceAudio = new Map(); // Map<meetingId, Map<userId, deviceEntry>>
+const flushedDeviceAudio = new Map();
 const roomParticipants = new Map();
 const rooms = new Map();
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FIX: Per-device chunk index tracking
+//
+// audio-chunk now uploads to S3 immediately (fire-and-forget). This means
+// chunks survive socket disconnects, start-recording queue resets, and race
+// conditions between end and flush-my-chunks.
+// ─────────────────────────────────────────────────────────────────────────────
+const chunkIndexCounters = new Map(); // Map<`${meetingId}:${userId}`, number>
+
+function nextChunkIndex(meetingId, userId) {
+  const key = `${meetingId}:${userId}`;
+  const next = (chunkIndexCounters.get(key) ?? 0);
+  chunkIndexCounters.set(key, next + 1);
+  return next;
+}
+
 const { uploadFile, listFiles } = require('./config/s3');
 const CHUNK_DURATION_MS = 10000;
 
@@ -161,11 +145,7 @@ io.use(async (socket, next) => {
   const token = socket.handshake.auth.token;
   if (!token) return next(new Error('Authentication required'));
   const workerToken = process.env.WORKER_SOCKET_TOKEN || 'worker-internal';
-  if (token === workerToken) {
-    socket.userId = 'worker';
-    socket.user = { firstName: 'Worker', lastName: 'Process' };
-    return next();
-  }
+  if (token === workerToken) { socket.userId = 'worker'; socket.user = { firstName: 'Worker', lastName: 'Process' }; return next(); }
   try {
     const jwt = require('jsonwebtoken');
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
@@ -242,27 +222,37 @@ io.on('connection', (socket) => {
   });
 
   // ── Per-device audio chunk ────────────────────────────────────────────────
-  // BUG 5 FIX: Do NOT clamp recordingStartTime.
+  //
+  // FIX: Upload to S3 immediately (fire-and-forget) in addition to buffering
+  // in memory. Previously chunks only lived in transcriptQueue. If the socket
+  // disconnected before flush-my-chunks fired, those chunks were lost and
+  // scanPerDeviceAudio found 0 device files.
+  //
+  // Now every chunk is written to S3 the moment it arrives. flush-my-chunks
+  // still runs for VAD scoring but is no longer the only write path.
   socket.on('audio-chunk', ({ meetingId, audioChunk, timestamp, recordingStartTime }) => {
     if (!transcriptQueue.has(meetingId)) transcriptQueue.set(meetingId, []);
     const queue = transcriptQueue.get(meetingId);
     const displayName = getDisplayName();
     const chunkTime = timestamp || Date.now();
     const effectiveStartTime = (recordingStartTime && recordingStartTime > 0) ? recordingStartTime : chunkTime;
-    const offsetSeconds = Math.round((chunkTime - effectiveStartTime) / 1000);
-    if (offsetSeconds > 300) logger.warn(`${displayName} recordingStartTime is ${offsetSeconds}s before chunkTime — keeping as-is`);
-    queue.push({ userId: socket.userId, userName: displayName, timestamp: chunkTime, recordingStartTime: effectiveStartTime, audioBuffer: Buffer.from(audioChunk) });
-    logger.info(`Audio chunk queued for ${displayName} in meeting ${meetingId}, queue size: ${queue.length}`);
+    const audioBuffer = Buffer.from(audioChunk);
+    const chunkIndex = nextChunkIndex(meetingId, socket.userId);
+
+    queue.push({ userId: socket.userId, userName: displayName, timestamp: chunkTime, recordingStartTime: effectiveStartTime, chunkIndex, audioBuffer });
+    logger.info(`Audio chunk queued for ${displayName} in meeting ${meetingId} (index=${chunkIndex}), queue size: ${queue.length}`);
+
+    // ── Fire-and-forget S3 upload ──────────────────────────────────────────
+    const audioKey = `meetings/${meetingId}/device-${socket.userId}-chunk${chunkIndex}-${chunkTime}.webm`;
+    uploadFile(audioKey, audioBuffer, 'audio/webm')
+      .then(() => logger.info(`S3 immediate upload OK: ${audioKey}`))
+      .catch(err => logger.warn(`S3 immediate upload failed for chunk ${chunkIndex} (${displayName}): ${err.message}`));
   });
 
   // ── Per-participant chunk flush with non-blocking VAD scoring ─────────────
   //
-  // CHANGE FROM PREVIOUS VERSION:
-  // VAD scoring is now done in the background AFTER responding to the socket.
-  // This means flush-my-chunks never times out on the frontend — it responds
-  // as soon as S3 uploads finish (~2-3s). VAD scores complete in the
-  // background before the user clicks "Analyze Meeting", so the worker
-  // always has real scores by the time it processes.
+  // flush-my-chunks now focuses purely on VAD scoring and writing the VAD
+  // sidecar. S3 upload already happened in audio-chunk.
   socket.on('flush-my-chunks', async ({ meetingId }) => {
     const queue = transcriptQueue.get(meetingId) || [];
     const myChunks = queue.filter(c => c.userId === socket.userId);
@@ -277,97 +267,57 @@ io.on('connection', (socket) => {
     if (!flushedDeviceAudio.has(meetingId)) flushedDeviceAudio.set(meetingId, new Map());
     const meetingFlushed = flushedDeviceAudio.get(meetingId);
 
-    // FIX: Track VAD completion state so get-transcript-queue knows when data is ready
     const vadCompletePromise = (async () => {
-      const uploadedChunks = [];
       let earliestStartTime = myChunks[0].recordingStartTime;
+      const uploadedChunks = [];
 
-      // Step 1 — Upload all chunks to S3 (fast, no VAD yet)
       for (let i = 0; i < myChunks.length; i++) {
         const chunk = myChunks[i];
         if (chunk.recordingStartTime < earliestStartTime) earliestStartTime = chunk.recordingStartTime;
-        const audioKey = `meetings/${meetingId}/device-${socket.userId}-chunk${i}-${chunk.timestamp}.webm`;
-        await uploadFile(audioKey, chunk.audioBuffer, 'audio/webm');
-        // Start with neutral voiceRatio — will be updated by background VAD
-        uploadedChunks.push({ audioKey, timestamp: chunk.timestamp, chunkIndex: i, voiceRatio: 0.5, hasVoice: false });
+        const audioKey = `meetings/${meetingId}/device-${socket.userId}-chunk${chunk.chunkIndex}-${chunk.timestamp}.webm`;
+        // Re-upload idempotently (same key) in case immediate upload failed
+        if (chunk.audioBuffer) {
+          try { await uploadFile(audioKey, chunk.audioBuffer, 'audio/webm'); } catch (e) { logger.warn(`flush-my-chunks re-upload failed for chunk ${chunk.chunkIndex}: ${e.message}`); }
+        }
+        uploadedChunks.push({ audioKey, timestamp: chunk.timestamp, chunkIndex: chunk.chunkIndex, voiceRatio: 0.5, hasVoice: false });
       }
 
-      // Step 2 — Store entry immediately (before responding)
-      // This ensures get-transcript-queue can find the entry even before VAD completes
-      meetingFlushed.set(socket.userId, {
-        userId: socket.userId,
-        userName: displayName,
-        recordingStartTime: earliestStartTime,
-        chunks: uploadedChunks,
-        audioKey: uploadedChunks[0]?.audioKey,
-        _vadComplete: false, // FIX: Flag to indicate VAD is still running
-      });
+      meetingFlushed.set(socket.userId, { userId: socket.userId, userName: displayName, recordingStartTime: earliestStartTime, chunks: uploadedChunks, audioKey: uploadedChunks[0]?.audioKey, _vadComplete: false });
+      logger.info(`flush-my-chunks S3 confirmed for ${displayName}: ${uploadedChunks.length} chunks — scoring VAD in background`);
 
-      logger.info(`flush-my-chunks S3 complete for ${displayName}: ${uploadedChunks.length} chunks — scoring VAD in background`);
-
-      // Step 3 — VAD scoring runs in background (non-blocking)
       try {
         for (let i = 0; i < myChunks.length; i++) {
-          const voiceRatio = await getVadScore(myChunks[i].audioBuffer, `${socket.userId}-chunk${i}.webm`);
+          const voiceRatio = await getVadScore(myChunks[i].audioBuffer, `${socket.userId}-chunk${myChunks[i].chunkIndex}.webm`);
           uploadedChunks[i].voiceRatio = voiceRatio;
           uploadedChunks[i].hasVoice = voiceRatio > 0.15;
-          logger.info(`  chunk ${i} ${displayName}: voiceRatio=${voiceRatio.toFixed(3)}`);
+          logger.info(`  chunk ${myChunks[i].chunkIndex} ${displayName}: voiceRatio=${voiceRatio.toFixed(3)}`);
         }
-        // Mark VAD as complete
-        meetingFlushed.set(socket.userId, {
-          userId: socket.userId,
-          userName: displayName,
-          recordingStartTime: earliestStartTime,
-          chunks: uploadedChunks,
-          audioKey: uploadedChunks[0]?.audioKey,
-          _vadComplete: true,
-        });
+        meetingFlushed.set(socket.userId, { userId: socket.userId, userName: displayName, recordingStartTime: earliestStartTime, chunks: uploadedChunks, audioKey: uploadedChunks[0]?.audioKey, _vadComplete: true });
         logger.info(`VAD scoring complete for ${displayName} in meeting ${meetingId}`);
-        // Persist VAD scores to S3 so the worker's scanPerDeviceAudio() can read them
+
         try {
           const vadKey = `meetings/${meetingId}/device-${socket.userId}-vad.json`;
-          const vadPayload = Buffer.from(JSON.stringify({
-            userId: socket.userId,
-            chunks: uploadedChunks.map(c => ({ chunkIndex: c.chunkIndex, voiceRatio: c.voiceRatio, hasVoice: c.hasVoice })),
-          }));
+          const vadPayload = Buffer.from(JSON.stringify({ userId: socket.userId, chunks: uploadedChunks.map(c => ({ chunkIndex: c.chunkIndex, voiceRatio: c.voiceRatio, hasVoice: c.hasVoice })) }));
           await uploadFile(vadKey, vadPayload, 'application/json');
           logger.info(`VAD sidecar written: ${vadKey}`);
-        } catch (vadWriteErr) {
-          logger.warn(`VAD sidecar upload failed for ${displayName}: ${vadWriteErr.message}`);
-        }
+        } catch (vadWriteErr) { logger.warn(`VAD sidecar upload failed for ${displayName}: ${vadWriteErr.message}`); }
       } catch (e) {
         logger.warn(`Background VAD failed for ${displayName}: ${e.message}`);
-        // Still mark as complete (with neutral scores) so we don't block forever
-        meetingFlushed.set(socket.userId, {
-          userId: socket.userId,
-          userName: displayName,
-          recordingStartTime: earliestStartTime,
-          chunks: uploadedChunks,
-          audioKey: uploadedChunks[0]?.audioKey,
-          _vadComplete: true,
-        });
-        // Write neutral-score sidecar so worker doesn't wait for a file that never arrives
+        meetingFlushed.set(socket.userId, { userId: socket.userId, userName: displayName, recordingStartTime: earliestStartTime, chunks: uploadedChunks, audioKey: uploadedChunks[0]?.audioKey, _vadComplete: true });
         try {
           const vadKey = `meetings/${meetingId}/device-${socket.userId}-vad.json`;
-          const vadPayload = Buffer.from(JSON.stringify({
-            userId: socket.userId,
-            chunks: uploadedChunks.map(c => ({ chunkIndex: c.chunkIndex, voiceRatio: 0.5, hasVoice: false })),
-          }));
+          const vadPayload = Buffer.from(JSON.stringify({ userId: socket.userId, chunks: uploadedChunks.map(c => ({ chunkIndex: c.chunkIndex, voiceRatio: 0.5, hasVoice: false })) }));
           await uploadFile(vadKey, vadPayload, 'application/json');
         } catch (_) { /* best-effort */ }
       }
     })();
 
-    // Respond immediately after S3 uploads start (don't wait for VAD)
     socket.emit('my-chunks-flushed', { meetingId, success: true, chunkCount: myChunks.length });
-
-    // Await VAD completion (fire-and-forget, but tracked for debugging)
     vadCompletePromise.catch(e => logger.warn(`Unhandled VAD promise rejection: ${e.message}`));
   });
 
   // ── Host collects combined per-device audio ───────────────────────────────
   socket.on('get-transcript-queue', async ({ meetingId, expectedParticipants }) => {
-    // Wait up to 15s for expected participants to flush their chunks
     if (expectedParticipants && expectedParticipants > 1) {
       for (let attempts = 0; attempts < 30; attempts++) {
         const meetingFlushed = flushedDeviceAudio.get(meetingId);
@@ -381,7 +331,6 @@ io.on('connection', (socket) => {
     const meetingFlushed = flushedDeviceAudio.get(meetingId);
 
     if (!meetingFlushed || meetingFlushed.size === 0) {
-      // Fallback: no flush done — upload directly from in-memory queue
       const queue = transcriptQueue.get(meetingId) || [];
       if (queue.length === 0) { socket.emit('transcript-queue', { meetingId, perDeviceAudio: [] }); return; }
 
@@ -398,12 +347,10 @@ io.on('connection', (socket) => {
           const uploadedChunks = [];
           for (let i = 0; i < data.chunks.length; i++) {
             const chunk = data.chunks[i];
-            const audioKey = `meetings/${meetingId}/device-${userId}-chunk${i}-${chunk.timestamp}.webm`;
+            const audioKey = `meetings/${meetingId}/device-${userId}-chunk${chunk.chunkIndex ?? i}-${chunk.timestamp}.webm`;
             await uploadFile(audioKey, chunk.audioBuffer, 'audio/webm');
-            // In fallback path VAD is still synchronous (no timeout risk here
-            // since this path only runs if flush-my-chunks was never called)
-            const voiceRatio = await getVadScore(chunk.audioBuffer, `${userId}-chunk${i}.webm`);
-            uploadedChunks.push({ audioKey, timestamp: chunk.timestamp, chunkIndex: i, voiceRatio, hasVoice: voiceRatio > 0.15 });
+            const voiceRatio = await getVadScore(chunk.audioBuffer, `${userId}-chunk${chunk.chunkIndex ?? i}.webm`);
+            uploadedChunks.push({ audioKey, timestamp: chunk.timestamp, chunkIndex: chunk.chunkIndex ?? i, voiceRatio, hasVoice: voiceRatio > 0.15 });
           }
           perDeviceAudio.push({ userId, userName: data.userName, recordingStartTime: data.recordingStartTime, chunks: uploadedChunks, audioKey: uploadedChunks[0]?.audioKey });
         } catch (e) { logger.warn(`Fallback upload failed for ${data.userName}: ${e.message}`); }
@@ -413,13 +360,9 @@ io.on('connection', (socket) => {
       return;
     }
 
-    // FIX: Wait for all participants' VAD to complete before returning
-    // This prevents race condition where get-transcript-queue fires before
-    // background VAD from flush-my-chunks has finished
     const allVadPromises = [];
     for (const [userId, entry] of meetingFlushed.entries()) {
       if (!entry._vadComplete) {
-        // VAD still running — poll until complete (max 10s wait)
         const pollVad = async () => {
           for (let attempts = 0; attempts < 20; attempts++) {
             await new Promise(r => setTimeout(r, 500));
@@ -447,12 +390,18 @@ io.on('connection', (socket) => {
     const room = rooms.get(meetingId);
     if (room) {
       room.recording = true;
-      transcriptQueue.set(meetingId, []);
+      // FIX: Only initialise the queue if it doesn't already exist.
+      // Previously transcriptQueue.set(meetingId, []) would wipe any chunks
+      // that arrived before start-recording fired on the server.
+      if (!transcriptQueue.has(meetingId)) transcriptQueue.set(meetingId, []);
       flushedDeviceAudio.delete(meetingId);
+      // Reset chunk index counters for this meeting
+      for (const [k] of chunkIndexCounters) {
+        if (k.startsWith(`${meetingId}:`)) chunkIndexCounters.delete(k);
+      }
       io.to(meetingId).emit('recording-started');
-      
-      // Ping Hugging Face to ensure the server is awake and models are loaded
-      // by the time the user clicks Stop Recording and processing starts.
+
+      // Pre-warm diarization service so no cold-start when processing starts
       fetch(`${DIARIZATION_URL}/health`, { timeout: 5000 })
         .then(() => logger.info(`Pre-warmed diarization service for meeting ${meetingId}`))
         .catch(e => logger.warn(`Failed to pre-warm diarization service: ${e.message}`));
@@ -492,6 +441,9 @@ io.on('connection', (socket) => {
               transcriptQueue.delete(meetingId);
               flushedDeviceAudio.delete(meetingId);
               roomParticipants.delete(meetingId);
+              for (const [k] of chunkIndexCounters) {
+                if (k.startsWith(`${meetingId}:`)) chunkIndexCounters.delete(k);
+              }
             }
           }, 30 * 60 * 1000);
         }
