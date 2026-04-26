@@ -177,7 +177,7 @@ async function transcribeWithGroq(audioPath, alreadyWavPath = null) {
     }
 
     const transcription = await runWithTimeout(
-      groq.audio.translations.create({
+      groq.audio.transcriptions.create({
         file: fs.createReadStream(pathToTranscribe),
         model: 'whisper-large-v3',
         response_format: 'verbose_json',

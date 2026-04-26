@@ -141,7 +141,7 @@ async function run() {
         return u;
       });
 
-      jobData = { meetingId: MEETING_ID, perDeviceAudio };
+      jobData = { meetingId: MEETING_ID, perDeviceAudio, audioKey: recordingFile || meeting.recordingUrl };
 
     } else if (recordingFile) {
       console.log(`✅ No per-device chunks found — using mixed recording`);
