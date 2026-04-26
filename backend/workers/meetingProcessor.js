@@ -182,7 +182,7 @@ async function transcribeWithGroq(audioPath, alreadyWavPath = null) {
         model: 'whisper-large-v3',
         response_format: 'verbose_json',
         temperature: 0,
-        prompt: "नमस्कार, यह मीटिंग हिंदी और English में है। Please use Devanagari script for Hindi.",
+        language: 'hi',
       }),
       300000,
       'Whisper transcription'
