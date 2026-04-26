@@ -10,7 +10,7 @@ import api from '@/lib/axios';
 import ReactMarkdown from 'react-markdown';
 import toast from 'react-hot-toast';
 
-export default function MeetingQAPanel({ meetingId, meetingName }) {
+export default function MeetingQAPanel({ meetingId, meetingName, isReady = true }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -144,11 +144,11 @@ export default function MeetingQAPanel({ meetingId, meetingName }) {
           <Input
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="Ask a question..."
-            disabled={isLoading || isStreaming}
+            placeholder={isReady ? "Ask a question..." : "Meeting must be analyzed first..."}
+            disabled={isLoading || isStreaming || !isReady}
             className="bg-muted border-border text-sm"
           />
-          <Button type="submit" disabled={!input.trim() || isLoading || isStreaming} size="icon">
+          <Button type="submit" disabled={!input.trim() || isLoading || isStreaming || !isReady} size="icon">
             {isLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
           </Button>
         </form>

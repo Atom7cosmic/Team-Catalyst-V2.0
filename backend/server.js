@@ -165,7 +165,13 @@ io.on('connection', (socket) => {
   };
 
   socket.on('worker-broadcast', ({ meetingId, event, data }) => {
-    if (meetingId && event) { io.to(meetingId).emit(event, data); logger.info(`Worker broadcast: ${event} → room ${meetingId}`); }
+    if (meetingId && event) {
+      const payload = (typeof data === 'object' && data !== null && !Array.isArray(data)) 
+        ? { ...data, timestamp: new Date().toISOString() } 
+        : data;
+      io.to(meetingId).emit(event, payload); 
+      logger.info(`Worker broadcast: ${event} → room ${meetingId}`); 
+    }
   });
 
   socket.on('media-state', ({ meetingId, audio, video }) => {

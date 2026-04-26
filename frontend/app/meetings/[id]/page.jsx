@@ -38,7 +38,6 @@ export default function MeetingDetailPage({ params }) {
   const [editingSegmentIdx, setEditingSegmentIdx] = useState(null);
   const [transcriptHasChanges, setTranscriptHasChanges] = useState(false);
   const [isSavingTranscript, setIsSavingTranscript] = useState(false);
-  const [cooldownRemaining, setCooldownRemaining] = useState(0);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
 
   const SPEAKER_COLORS = [
@@ -62,29 +61,6 @@ export default function MeetingDetailPage({ params }) {
       return () => clearInterval(interval);
     }
   }, [meeting?.status, refetch]);
-
-  // FIX 3: 60-second cooldown after meeting ends before Analyze button becomes available.
-  // If endedAt is missing, secondsSinceEnd = 999, so remaining = Math.max(0, 60-999) = 0
-  // → button is immediately active when endedAt is absent. This is correct behavior.
-  useEffect(() => {
-    const calculateCooldown = () => {
-      const endedAt = meeting?.endedAt;
-      const secondsSinceEnd = endedAt
-        ? Math.floor((Date.now() - new Date(endedAt).getTime()) / 1000)
-        : 999;
-      return Math.max(0, 60 - secondsSinceEnd);
-    };
-
-    setCooldownRemaining(calculateCooldown());
-
-    const interval = setInterval(() => {
-      const remaining = calculateCooldown();
-      setCooldownRemaining(remaining);
-      if (remaining === 0) clearInterval(interval);
-    }, 1000);
-
-    return () => clearInterval(interval);
-  }, [meeting?.endedAt]);
 
   // Removed manual fetchMeeting and fetchProcessingStatus here, they are handled by useMeetingDetail
 
@@ -466,54 +442,26 @@ export default function MeetingDetailPage({ params }) {
 
             {meeting.status === 'completed' && !isProcessing && (
               meeting.recordingUrl ? (
-                <>
-                  {cooldownRemaining > 0 ? (
-                    <div className="relative group">
-                      <Button
-                        variant="outline"
-                        className="w-full sm:w-auto border-purple-500/20 text-purple-400 bg-purple-500/5 hover:bg-purple-500/10 hover:text-purple-300 relative pl-12 transition-all overflow-hidden"
-                        disabled
-                      >
-                        <div className="absolute left-3 top-1/2 -translate-y-1/2 flex items-center justify-center">
-                          <svg width="24" height="24" viewBox="0 0 40 40" className="transform -rotate-90">
-                            <circle cx="20" cy="20" r="16" fill="transparent" stroke="currentColor" strokeWidth="4" className="text-purple-500/20" />
-                            <circle
-                              cx="20" cy="20" r="16" fill="transparent" stroke="currentColor" strokeWidth="4"
-                              className="text-purple-400 transition-all duration-1000 ease-linear"
-                              style={{
-                                strokeDasharray: 100.5,
-                                strokeDashoffset: (1 - cooldownRemaining / 60) * 100.5
-                              }}
-                            />
-                          </svg>
-                          <span className="absolute text-[10px] font-bold text-purple-300">{cooldownRemaining}</span>
-                        </div>
-                        <span className="opacity-70">Waiting for audio sync...</span>
-                      </Button>
-                    </div>
-                  ) : (
-                    <Button
-                      disabled={isAnalyzing}
-                      onClick={async () => {
-                        if (isAnalyzing) return; // double-click guard
-                        setIsAnalyzing(true);
-                        try {
-                          toast.loading('Starting analysis...', { id: 'analyze' });
-                          await api.post(`/meetings/${meeting._id}/analyze`);
-                          toast.success('Analysis started! Processing your meeting now.', { id: 'analyze', duration: 4000 });
-                          refetch();
-                        } catch (error) {
-                          toast.error(error?.response?.data?.message || 'Failed to start analysis', { id: 'analyze' });
-                        } finally {
-                          setIsAnalyzing(false);
-                        }
-                      }}
-                      className="w-full sm:w-auto bg-purple-600 hover:bg-purple-700 disabled:opacity-60 disabled:cursor-not-allowed text-white shadow-lg shadow-purple-500/20 analyze-ready transition-all"
-                    >
-                      {isAnalyzing ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Starting...</> : <>✨ Analyze Meeting</>}
-                    </Button>
-                  )}
-                </>
+                <Button
+                  disabled={isAnalyzing}
+                  onClick={async () => {
+                    if (isAnalyzing) return; // double-click guard
+                    setIsAnalyzing(true);
+                    try {
+                      toast.loading('Starting analysis...', { id: 'analyze' });
+                      await api.post(`/meetings/${meeting._id}/analyze`);
+                      toast.success('Analysis started! Processing your meeting now.', { id: 'analyze', duration: 4000 });
+                      refetch();
+                    } catch (error) {
+                      toast.error(error?.response?.data?.message || 'Failed to start analysis', { id: 'analyze' });
+                    } finally {
+                      setIsAnalyzing(false);
+                    }
+                  }}
+                  className="w-full sm:w-auto bg-purple-600 hover:bg-purple-700 disabled:opacity-60 disabled:cursor-not-allowed text-white shadow-lg shadow-purple-500/20 analyze-ready transition-all"
+                >
+                  {isAnalyzing ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Starting...</> : <>✨ Analyze Meeting</>}
+                </Button>
               ) : (
                 <div className="relative group">
                   <Button disabled className="bg-purple-600/50 cursor-not-allowed">
@@ -698,7 +646,7 @@ export default function MeetingDetailPage({ params }) {
           </div>
 
           <div className="space-y-6">
-            <MeetingQAPanel meetingId={meeting._id} meetingName={meeting.name} />
+            <MeetingQAPanel meetingId={meeting._id} meetingName={meeting.name} isReady={meeting.status === 'ready'} />
             <SimilarMeetingsPanel meetingId={meeting._id} />
           </div>
         </div>

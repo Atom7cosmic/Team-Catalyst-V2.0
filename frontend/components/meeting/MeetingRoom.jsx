@@ -254,9 +254,11 @@ export default function MeetingRoom({ meetingId, user, meetingName }) {
   const [isConnecting, setIsConnecting] = useState(true);
   const [isHost, setIsHost] = useState(false);
   const [isEndingMeeting, setIsEndingMeeting] = useState(false);
+  const isUploadingRef = useRef(false);
   const [pinnedUserId, setPinnedUserId] = useState(null);
   const [fullscreenUserId, setFullscreenUserId] = useState(null);
   const [meetingCancelled, setMeetingCancelled] = useState(false);
+  const [meetingEndedOverlay, setMeetingEndedOverlay] = useState(false);
   const [isNativeFullscreen, setIsNativeFullscreen] = useState(false);
   const [isMyRecording, setIsMyRecording] = useState(false);
   const [participantMediaState, setParticipantMediaState] = useState({});
@@ -586,7 +588,9 @@ export default function MeetingRoom({ meetingId, user, meetingName }) {
         //   stopMyRecording → flush-my-chunks → wait → cleanup → navigate
         socketRef.current.on('meeting-ended', async () => {
           if (isEndingRef.current) return; // host is already handling this
-          toast.success('Meeting ended by host');
+          // Show overlay immediately so user knows what's happening
+          setMeetingEndedOverlay(true);
+          toast.success('Meeting ended by host — saving your audio...');
           await stopMyRecording();
           if (socketRef.current?.connected) {
             socketRef.current.emit('flush-my-chunks', { meetingId });
@@ -595,7 +599,8 @@ export default function MeetingRoom({ meetingId, user, meetingName }) {
             await new Promise(r => setTimeout(r, 3000));
           }
           cleanup();
-          router.push(`/meetings/${meetingId}`);
+          // Hard redirect — ensures navigation even if Next.js router is slow
+          window.location.href = `/meetings/${meetingId}`;
         });
 
         socketRef.current.on('meeting-cancelled', ({ message }) => {
@@ -727,6 +732,7 @@ export default function MeetingRoom({ meetingId, user, meetingName }) {
       recordingChunksRef.current = [];
       recorder.ondataavailable = e => { if (e.data.size > 0) recordingChunksRef.current.push(e.data); };
       recorder.onstop = async () => {
+        isUploadingRef.current = true;
         const chunks = [...recordingChunksRef.current];
         recordingChunksRef.current = [];
         const blob = new Blob(chunks, { type: 'audio/webm' });
@@ -750,6 +756,8 @@ export default function MeetingRoom({ meetingId, user, meetingName }) {
         } catch (e) {
           console.error('Upload failed:', e);
           toast.error('Failed to upload recording. Please try manual upload in history.', { id: 'upload' });
+        } finally {
+          isUploadingRef.current = false;
         }
       };
       recorder.start(1000); mediaRecorderRef.current = recorder;
@@ -761,6 +769,7 @@ export default function MeetingRoom({ meetingId, user, meetingName }) {
     if (mediaRecorderRef.current?.state !== 'inactive') mediaRecorderRef.current?.stop();
     socketRef.current?.emit('stop-recording', { meetingId });
     setIsRecording(false);
+    isUploadingRef.current = true;
     toast.success('Recording stopped — uploading...');
   }, [meetingId]);
 
@@ -792,11 +801,14 @@ export default function MeetingRoom({ meetingId, user, meetingName }) {
   //
   // isEndingRef blocks the 'meeting-ended' socket handler from racing with
   // this function — the host receives its own broadcast too.
-  const handleEndMeeting = useCallback(async () => {
+  const handleEndMeeting = async () => {
     if (!isHost || isEndingRef.current) return;
     isEndingRef.current = true;
     setIsEndingMeeting(true);
+    setMeetingEndedOverlay(true);
     try {
+      // POST /end first — this fires the 'meeting-ended' socket event to all
+      // non-host participants so they start their own teardown immediately.
       await api.post(`/meetings/${meetingId}/end`);
 
       if (isRecording && mediaRecorderRef.current?.state !== 'inactive') {
@@ -816,21 +828,34 @@ export default function MeetingRoom({ meetingId, user, meetingName }) {
         await stopMyRecording();
       }
 
-      // Flush host's per-device audio chunks to S3 before worker processes
+      // If recording upload is still in-flight (host stopped recording just before
+      // ending), wait for it so the recording file lands in S3 before we navigate.
+      if (isUploadingRef.current) {
+        toast.loading('Uploading recording — please wait...', { id: 'wait-upload' });
+        while (isUploadingRef.current) {
+          await new Promise(r => setTimeout(r, 500));
+        }
+        toast.dismiss('wait-upload');
+      }
+
+      // Flush host's own per-device audio chunks to S3.
+      // Keep the socket alive long enough for this to complete before cleanup()
+      // closes the connection — non-host clients already have a 3s window too.
       if (socketRef.current?.connected) {
         socketRef.current.emit('flush-my-chunks', { meetingId });
         await new Promise(r => setTimeout(r, 2000));
       }
 
-      toast.success('Meeting ended');
       cleanup();
-      router.push(`/meetings/${meetingId}`);
+      // Hard redirect — more reliable than router.push after socket teardown
+      window.location.href = `/meetings/${meetingId}`;
     } catch (e) {
-      isEndingRef.current = false; // allow retry
+      isEndingRef.current = false;
+      setMeetingEndedOverlay(false);
       toast.error(e?.response?.data?.message || 'Failed to end meeting');
       setIsEndingMeeting(false);
     }
-  }, [isHost, isRecording, meetingId, stopMyRecording, cleanup]);
+  };
 
   const remoteEntries = Object.entries(remoteStreams);
   const totalParticipants = remoteEntries.length + 1;
@@ -842,6 +867,17 @@ export default function MeetingRoom({ meetingId, user, meetingName }) {
       setLayoutMode('stage');
     }
   }, [totalParticipants, pinnedUserId]);
+
+  if (meetingEndedOverlay) return (
+    <div className="h-screen flex items-center justify-center bg-[var(--jitsi-bg)] text-white">
+      <div className="text-center space-y-5">
+        <div className="animate-spin h-14 w-14 border-2 border-green-400 border-t-transparent rounded-full mx-auto" />
+        <h2 className="text-xl font-semibold text-green-400">Meeting Ended</h2>
+        <p className="text-white/70">Saving your audio and redirecting...</p>
+        <p className="text-white/40 text-sm">Please wait — do not close this tab.</p>
+      </div>
+    </div>
+  );
 
   if (meetingCancelled) return (
     <div className="h-screen flex items-center justify-center bg-background text-foreground">
