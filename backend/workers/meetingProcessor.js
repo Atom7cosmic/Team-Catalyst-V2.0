@@ -207,7 +207,7 @@ async function diarizeWithPyannote(audioPath, numSpeakers) {
     // FIX 1: Pyannote diarization wrapped in timeout
     const response = await runWithTimeout(
       fetch(url, { method: 'POST', body: form, headers: form.getHeaders() }),
-      300000, // 5 minutes
+      900000, // 15 minutes (HF Free Tier CPU can be very slow)
       'Pyannote diarization'
     );
     if (!response.ok) { logger.warn(`Pyannote failed: ${await response.text()}`); return null; }
@@ -746,7 +746,7 @@ async function processMeeting(job) {
     logger.info(`Attempting Pyannote diarization (${perDeviceAudio.length > 0 ? 'will map via VAD' : 'identity by speaking time'})`);
     const diarSegments = await runWithTimeout(
       diarizeWithPyannote(localAudioPath, attendeeNames.length || perDeviceAudio.length),
-      330000,
+      930000, // 15.5 mins (wraps the inner 15 min timeout)
       'Pyannote diarization'
     ).catch(e => { logger.warn(`Pyannote timed out or failed: ${e.message}`); return null; });
 

@@ -31,7 +31,7 @@ try {
 // any meeting that has been processing for >15 minutes, marking it with a
 // clear error message so the user can click "Analyze Meeting" to retry.
 // ─────────────────────────────────────────────────────────────────────────────
-const STALE_PROCESSING_THRESHOLD_MS = 15 * 60 * 1000; // 15 minutes
+const STALE_PROCESSING_THRESHOLD_MS = 25 * 60 * 1000; // 25 minutes
 const STALE_CHECK_INTERVAL_MS = 5 * 60 * 1000;        // check every 5 minutes
 
 async function detectAndFailStaleMeetings() {
