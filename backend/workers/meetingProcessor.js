@@ -120,7 +120,7 @@ async function getAudioDuration(filePath) {
     }
   } catch (e) {
     logger.warn(`WAV fallback duration probe failed: ${e.message}`);
-    if (wavPath && wavPath !== filePath) { try { fs.unlinkSync(wavPath); } catch (_) {} }
+    if (wavPath && wavPath !== filePath) { try { fs.unlinkSync(wavPath); } catch (_) { } }
   }
   return { duration: 0, wavPath: null };
 }
@@ -187,7 +187,7 @@ async function transcribeWithGroq(audioPath, alreadyWavPath = null) {
       'Whisper transcription'
     );
     // Only delete tempWav if WE created it (not the caller's alreadyWavPath)
-    if (tempWav && tempWav !== audioPath) { try { fs.unlinkSync(tempWav); } catch (_) {} }
+    if (tempWav && tempWav !== audioPath) { try { fs.unlinkSync(tempWav); } catch (_) { } }
     return transcription;
   } catch (error) {
     logger.error(`Groq transcription error: ${error.message}`);
@@ -391,7 +391,7 @@ async function scanPerDeviceAudio(meetingId) {
           for (const chunk of entry.chunks) {
             if (scoreMap[chunk.chunkIndex] !== undefined) {
               chunk.voiceRatio = scoreMap[chunk.chunkIndex].voiceRatio;
-              chunk.hasVoice  = scoreMap[chunk.chunkIndex].hasVoice;
+              chunk.hasVoice = scoreMap[chunk.chunkIndex].hasVoice;
             }
           }
           logger.info(`VAD sidecar loaded for ${userId}: [${entry.chunks.map(c => c.voiceRatio.toFixed(2)).join(', ')}]`);
@@ -532,7 +532,7 @@ function mapPyannoteToVadIdentities(groqSegments, pyannoteSegments, perDeviceAud
   const windows = [];
   for (const device of perDeviceAudio) {
     for (const chunk of device.chunks || []) {
-      const windowEnd   = (chunk.timestamp - meetingEpoch) / 1000;
+      const windowEnd = (chunk.timestamp - meetingEpoch) / 1000;
       const windowStart = windowEnd - CHUNK_MS / 1000;
       windows.push({ userName: device.userName, windowStart, windowEnd, voiceRatio: chunk.voiceRatio ?? 0.5 });
     }
@@ -544,7 +544,7 @@ function mapPyannoteToVadIdentities(groqSegments, pyannoteSegments, perDeviceAud
     if (!speakerScores[pSeg.speaker]) speakerScores[pSeg.speaker] = {};
     for (const w of windows) {
       const overlapStart = Math.max(pSeg.start, w.windowStart);
-      const overlapEnd   = Math.min(pSeg.end,   w.windowEnd);
+      const overlapEnd = Math.min(pSeg.end, w.windowEnd);
       if (overlapEnd <= overlapStart) continue;
       const overlapSecs = overlapEnd - overlapStart;
       speakerScores[pSeg.speaker][w.userName] =
@@ -576,7 +576,7 @@ function mapPyannoteToVadIdentities(groqSegments, pyannoteSegments, perDeviceAud
     const mid = ((seg.start || 0) + (seg.end || 0)) / 2;
     const pSeg = pyannoteSegments.find(p => p.start <= mid && mid <= p.end)
       || pyannoteSegments.reduce((a, b) =>
-          Math.abs((a.start + a.end) / 2 - mid) < Math.abs((b.start + b.end) / 2 - mid) ? a : b, pyannoteSegments[0]);
+        Math.abs((a.start + a.end) / 2 - mid) < Math.abs((b.start + b.end) / 2 - mid) ? a : b, pyannoteSegments[0]);
     return { ...seg, speaker: speakerMap[pSeg?.speaker] || perDeviceAudio[0]?.userName || 'Unknown' };
   });
 }
@@ -657,7 +657,7 @@ async function processMeeting(job) {
       logger.info('Large file — splitting into 10-minute WAV chunks');
       // Duration-probe WAV no longer useful for split path — clean up now
       if (durationProbeWavPath) {
-        try { fs.unlinkSync(durationProbeWavPath); } catch (_) {}
+        try { fs.unlinkSync(durationProbeWavPath); } catch (_) { }
         durationProbeWavPath = null;
       }
       const audioChunks = await splitAudio(localAudioPath);
@@ -678,7 +678,7 @@ async function processMeeting(job) {
           }
         });
         timeOffset += 600;
-        try { fs.unlinkSync(chunk); } catch (_) {}
+        try { fs.unlinkSync(chunk); } catch (_) { }
       }
       groqResult = { text: fullText, segments: allSegs };
     } else {
@@ -985,10 +985,10 @@ async function processMeeting(job) {
     } catch (updateError) { logger.error(`Failed to update meeting status: ${updateError.message}`); }
     throw error;
   } finally {
-    if (localAudioPath) { try { fs.unlinkSync(localAudioPath); } catch (_) {} }
+    if (localAudioPath) { try { fs.unlinkSync(localAudioPath); } catch (_) { } }
     // Clean up the duration-probe WAV if it wasn't already consumed above
-    if (durationProbeWavPath) { try { fs.unlinkSync(durationProbeWavPath); } catch (_) {} }
-    for (const chunk of splitChunks) { try { fs.unlinkSync(chunk); } catch (_) {} }
+    if (durationProbeWavPath) { try { fs.unlinkSync(durationProbeWavPath); } catch (_) { } }
+    for (const chunk of splitChunks) { try { fs.unlinkSync(chunk); } catch (_) { } }
   }
 }
 
