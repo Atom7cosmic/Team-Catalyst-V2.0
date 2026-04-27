@@ -98,7 +98,9 @@ Rules:
 7. Never use bullet points unless listing 3+ distinct items
 8. Do not start with "According to the transcript" — just answer directly
 9. Use past tense — the meeting already happened
-10. Format: plain readable text, bold only for names when introducing them`],
+10. Format: plain readable text, bold only for names when introducing them
+11. If the user just says "hello", "hi", "hey", or a general greeting without a question, reply exactly with "Hello and what's your question?"
+12. If the user asks a question completely unrelated and irrespective to the meetings or the provided context, normally reply that you don't know about it.`],
     ['human', `Meeting transcript context:
 {context}
 

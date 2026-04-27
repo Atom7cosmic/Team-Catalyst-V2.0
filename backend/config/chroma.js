@@ -44,9 +44,14 @@ const initializeCollections = async () => {
     } catch {
       await chromaClient.createCollection({
         name: 'meeting_transcripts',
-        metadata: { description: 'Meeting transcript chunks for RAG' }
+        metadata: { 
+          description: 'Meeting transcript chunks for RAG',
+          "hnsw:space": "cosine",       // Use cosine similarity for HNSW vector index
+          "hnsw:construction_ef": 100,  // HNSW property: trade-off between index construction time and index accuracy
+          "hnsw:search_ef": 100         // HNSW property: trade-off between search time and search accuracy
+        }
       });
-      logger.info('Created meeting_transcripts collection');
+      logger.info('Created meeting_transcripts collection with HNSW properties');
     }
 
     // Employee performance collection
@@ -56,9 +61,14 @@ const initializeCollections = async () => {
     } catch {
       await chromaClient.createCollection({
         name: 'employee_performance',
-        metadata: { description: 'Employee performance summaries for analysis' }
+        metadata: { 
+          description: 'Employee performance summaries for analysis',
+          "hnsw:space": "cosine",
+          "hnsw:construction_ef": 100,
+          "hnsw:search_ef": 100
+        }
       });
-      logger.info('Created employee_performance collection');
+      logger.info('Created employee_performance collection with HNSW properties');
     }
 
     logger.info('ChromaDB collections initialized');
