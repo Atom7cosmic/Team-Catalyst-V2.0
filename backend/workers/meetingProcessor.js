@@ -361,12 +361,8 @@ async function scanPerDeviceAudio(meetingId) {
         byUser[userId] = {
           userId,
           userName: userId, // will be resolved from meeting attendees below
-          recordingStartTime: timestamp,
           chunks: [],
         };
-      }
-      if (timestamp < byUser[userId].recordingStartTime) {
-        byUser[userId].recordingStartTime = timestamp;
       }
       byUser[userId].chunks.push({ audioKey: key, timestamp, chunkIndex, voiceRatio: 0.5 });
     }
@@ -374,6 +370,13 @@ async function scanPerDeviceAudio(meetingId) {
     // Sort chunks within each user by chunkIndex
     for (const entry of Object.values(byUser)) {
       entry.chunks.sort((a, b) => a.chunkIndex - b.chunkIndex);
+      if (entry.chunks.length > 0) {
+        // Fix: timestamp represents the END of the chunk. True start time
+        // is first chunk's timestamp minus its duration (10s) and index offset
+        entry.recordingStartTime = entry.chunks[0].timestamp - 10000 - (entry.chunks[0].chunkIndex * 10000);
+      } else {
+        entry.recordingStartTime = Date.now();
+      }
     }
 
     // Load VAD sidecar files written by server.js flush-my-chunks handler.
