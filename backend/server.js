@@ -100,6 +100,24 @@ app.get('/health', (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // VAD scoring helper
 // ─────────────────────────────────────────────────────────────────────────────
+function pLimit(concurrency) {
+  const queue = [];
+  let activeCount = 0;
+  const next = () => {
+    activeCount--;
+    if (queue.length > 0) queue.shift()();
+  };
+  return (fn) => new Promise((resolve, reject) => {
+    const run = async () => {
+      activeCount++;
+      try { resolve(await fn()); } catch (err) { reject(err); } finally { next(); }
+    };
+    if (activeCount < concurrency) run(); else queue.push(run);
+  });
+}
+
+const vadLimit = pLimit(10); // Max 10 concurrent requests to HF Space
+
 async function getVadScore(audioBuffer, filename) {
   try {
     const form = new FormData();
@@ -296,9 +314,10 @@ io.on('connection', (socket) => {
         // bounded by a single /vad-score call (~1–3s) regardless of chunk count.
         // Serial scoring took 10s × N chunks — a 30-min meeting had 180 chunks
         // = 1800s, far exceeding the BullMQ 30s delay, so the sidecar was never
-        // ready when the worker scanned S3.
+        // bounded by a single /vad-score call (~1–3s) regardless of chunk count.
+        // Limited to 10 concurrent requests globally to avoid overwhelming HF Space.
         const vadResults = await Promise.all(
-          myChunks.map(c => getVadScore(c.audioBuffer, `${socket.userId}-chunk${c.chunkIndex}.webm`))
+          myChunks.map(c => vadLimit(() => getVadScore(c.audioBuffer, `${socket.userId}-chunk${c.chunkIndex}.webm`)))
         );
         vadResults.forEach((voiceRatio, i) => {
           uploadedChunks[i].voiceRatio = voiceRatio;
@@ -362,7 +381,7 @@ io.on('connection', (socket) => {
             const chunk = data.chunks[i];
             const audioKey = `meetings/${meetingId}/device-${userId}-chunk${chunk.chunkIndex ?? i}-${chunk.timestamp}.webm`;
             await uploadFile(audioKey, chunk.audioBuffer, 'audio/webm');
-            const voiceRatio = await getVadScore(chunk.audioBuffer, `${userId}-chunk${chunk.chunkIndex ?? i}.webm`);
+            const voiceRatio = await vadLimit(() => getVadScore(chunk.audioBuffer, `${userId}-chunk${chunk.chunkIndex ?? i}.webm`));
             uploadedChunks.push({ audioKey, timestamp: chunk.timestamp, chunkIndex: chunk.chunkIndex ?? i, voiceRatio, hasVoice: voiceRatio > 0.15 });
           }
           perDeviceAudio.push({ userId, userName: data.userName, recordingStartTime: data.recordingStartTime, chunks: uploadedChunks, audioKey: uploadedChunks[0]?.audioKey });
