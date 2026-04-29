@@ -513,14 +513,36 @@ async function assignSpeakersFromDeviceTimeline(segments, perDeviceAudio) {
 // Uses Pyannote diarization for millisecond-accurate speaker BOUNDARIES and
 // per-device VAD sidecars to map anonymous labels (SPEAKER_00) to real names.
 //
-// This gives the best of both worlds:
-//   • Pyannote: detects the exact second a speaker switches (handles rapid dialogue)
-//   • VAD sidecar: knows which device (person) was active in each time window
-//
-// Algorithm:
-//   For each Pyannote anonymous segment, accumulate VAD-weighted overlap scores
-//   for every participant. The participant with the highest score wins that label.
+// KEY FIX: Instead of the old midpoint heuristic (one speaker per Whisper
+// segment), we now SPLIT Whisper segments at every Pyannote speaker-change
+// boundary. Text is divided at the nearest sentence boundary to the
+// proportional time split point, so rapid dialogue is attributed correctly.
 // ─────────────────────────────────────────────────────────────────────────────
+
+// Split `text` into [before, after] at the sentence boundary closest to
+// `proportion` (0–1) of the total length. Falls back to word boundary.
+function splitAtSentenceBoundary(text, proportion) {
+  if (!text || proportion <= 0) return ['', text || ''];
+  if (proportion >= 1) return [text, ''];
+  const targetLen = Math.round(text.length * proportion);
+  const sentenceEnds = [];
+  for (let i = 0; i < text.length; i++) {
+    if (/[.!?]/.test(text[i])) sentenceEnds.push(i + 1);
+  }
+  if (sentenceEnds.length > 0) {
+    const closest = sentenceEnds.reduce((prev, curr) =>
+      Math.abs(curr - targetLen) < Math.abs(prev - targetLen) ? curr : prev);
+    // Only use if it's a non-trivial split (not slicing off <8% or >92%)
+    if (closest > text.length * 0.08 && closest < text.length * 0.92) {
+      return [text.substring(0, closest).trim(), text.substring(closest).trim()];
+    }
+  }
+  // Fall back to word boundary
+  const words = text.split(/\s+/);
+  const cut = Math.max(1, Math.min(words.length - 1, Math.round(words.length * proportion)));
+  return [words.slice(0, cut).join(' '), words.slice(cut).join(' ')];
+}
+
 function mapPyannoteToVadIdentities(groqSegments, pyannoteSegments, perDeviceAudio) {
   const CHUNK_MS = 10000;
   const recordingStartTimes = perDeviceAudio
@@ -558,8 +580,6 @@ function mapPyannoteToVadIdentities(groqSegments, pyannoteSegments, perDeviceAud
   // Greedily assign each anonymous speaker to the highest-scoring participant
   const assigned = new Set();
   const speakerMap = {};
-  // Sort anonymous speakers by confidence (highest total score first)
-  // Use reduce instead of spread to avoid call-stack overflow with large arrays
   const sortedPSpeakers = Object.entries(speakerScores).sort((a, b) => {
     const aMax = Object.values(a[1]).reduce((m, v) => Math.max(m, v), 0);
     const bMax = Object.values(b[1]).reduce((m, v) => Math.max(m, v), 0);
@@ -574,14 +594,85 @@ function mapPyannoteToVadIdentities(groqSegments, pyannoteSegments, perDeviceAud
 
   logger.info(`Pyannote→VAD identity map: ${JSON.stringify(speakerMap)}`);
 
-  // Assign each Whisper segment using Pyannote boundary → mapped identity
-  return groqSegments.map(seg => {
-    const mid = ((seg.start || 0) + (seg.end || 0)) / 2;
-    const pSeg = pyannoteSegments.find(p => p.start <= mid && mid <= p.end)
-      || pyannoteSegments.reduce((a, b) =>
-        Math.abs((a.start + a.end) / 2 - mid) < Math.abs((b.start + b.end) / 2 - mid) ? a : b, pyannoteSegments[0]);
-    return { ...seg, speaker: speakerMap[pSeg?.speaker] || perDeviceAudio[0]?.userName || 'Unknown' };
-  });
+  const fallback = perDeviceAudio[0]?.userName || 'Unknown';
+
+  // ── Split each Whisper segment at Pyannote speaker-change boundaries ─────
+  // Old approach: midpoint → one speaker per segment (wrong for rapid dialogue)
+  // New approach: find all Pyannote spans covering this segment, collapse
+  // consecutive identical speakers, then split text proportionally.
+  const result = [];
+
+  for (const seg of groqSegments) {
+    const segStart = seg.start || 0;
+    const segEnd   = seg.end   || 0;
+    const segDur   = segEnd - segStart;
+
+    // All Pyannote segments that overlap this Whisper segment, sorted by time
+    const overlapping = pyannoteSegments
+      .filter(p => p.start < segEnd && p.end > segStart)
+      .sort((a, b) => a.start - b.start);
+
+    if (overlapping.length === 0) {
+      result.push({ ...seg, speaker: fallback });
+      continue;
+    }
+
+    // Build collapsed speaker spans (merge consecutive identical speakers)
+    const spans = [];
+    for (const p of overlapping) {
+      const spStart = Math.max(segStart, p.start);
+      const spEnd   = Math.min(segEnd, p.end);
+      if (spEnd <= spStart) continue;
+      const spk = speakerMap[p.speaker] || fallback;
+      if (spans.length > 0 && spans[spans.length - 1].speaker === spk) {
+        spans[spans.length - 1].end = spEnd; // extend same-speaker span
+      } else {
+        spans.push({ start: spStart, end: spEnd, speaker: spk });
+      }
+    }
+
+    if (spans.length === 0) { result.push({ ...seg, speaker: fallback }); continue; }
+    if (spans.length === 1) { result.push({ ...seg, speaker: spans[0].speaker }); continue; }
+
+    // Multiple speakers — split text proportionally at sentence boundaries
+    let remainingText = (seg.text || '').trim();
+    let remainingDur  = segDur;
+
+    for (let i = 0; i < spans.length; i++) {
+      const span   = spans[i];
+      const spanDur = span.end - span.start;
+      const isLast  = i === spans.length - 1;
+
+      let textPart;
+      if (isLast || remainingDur <= 0) {
+        textPart      = remainingText;
+        remainingText = '';
+      } else {
+        const proportion = remainingDur > 0 ? spanDur / remainingDur : 0;
+        [textPart, remainingText] = splitAtSentenceBoundary(remainingText, proportion);
+        remainingDur -= spanDur;
+      }
+
+      if (textPart && textPart.trim()) {
+        result.push({
+          ...seg,
+          start:     span.start,
+          end:       span.end,
+          startTime: span.start,
+          endTime:   span.end,
+          text:      textPart.trim(),
+          speaker:   span.speaker,
+        });
+      }
+    }
+
+    // Safety: if text remains after all spans, append to last pushed entry
+    if (remainingText && remainingText.trim() && result.length > 0) {
+      result[result.length - 1].text += ' ' + remainingText.trim();
+    }
+  }
+
+  return result;
 }
 
 function formatTime(seconds) {
@@ -856,6 +947,15 @@ async function processMeeting(job) {
       };
     });
 
+    // Compute per-speaker total speaking time (seconds) from transcript segments
+    const speakingTimeByName = {};
+    for (const seg of meeting.transcriptSegments) {
+      if (seg.speaker) {
+        const dur = (seg.endTime || 0) - (seg.startTime || 0);
+        speakingTimeByName[seg.speaker] = (speakingTimeByName[seg.speaker] || 0) + dur;
+      }
+    }
+
     // P1 FIX (sequential scoring): The old serial for-loop scored attendees one
     // at a time — 10 attendees × 2-min timeout = 20 min max in Step 4 alone.
     // We now run scoring in parallel batches of 3, capping total time at
@@ -865,6 +965,7 @@ async function processMeeting(job) {
 
     const scoreOneAttendee = async (attendee) => {
       const name = `${attendee.user?.firstName || ''} ${attendee.user?.lastName || ''}`.trim().replace(/\s+/g, ' ');
+      const speakingTime = Math.round(speakingTimeByName[name] || 0);
       try {
         const contribution = await runWithTimeout(
           scoreAttendeeChain(name, meeting.transcriptRaw, meeting.domain, meeting.transcriptSegments),
@@ -874,10 +975,10 @@ async function processMeeting(job) {
         const score = (contribution.score && !isNaN(contribution.score)) ? contribution.score : 5;
         attendee.contributionScore = score;
         attendee.keyPoints = contribution.keyPoints || [];
-        meeting.attendeeContributions.push({ user: attendee.user._id, name, score, keyPoints: contribution.keyPoints || [], speakingTime: 0 });
+        meeting.attendeeContributions.push({ user: attendee.user._id, name, score, keyPoints: contribution.keyPoints || [], speakingTime });
       } catch (e) {
         logger.warn(`Score failed for ${name}: ${e.message}`);
-        meeting.attendeeContributions.push({ user: attendee.user._id, name, score: 5, keyPoints: [], speakingTime: 0 });
+        meeting.attendeeContributions.push({ user: attendee.user._id, name, score: 5, keyPoints: [], speakingTime });
       }
     };
 
