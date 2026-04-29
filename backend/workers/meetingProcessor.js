@@ -196,15 +196,47 @@ async function transcribeWithGroq(audioPath, alreadyWavPath = null) {
 }
 
 async function diarizeWithPyannote(audioPath, numSpeakers) {
-  try {
-    const healthRes = await fetch(`${DIARIZATION_URL}/health`, { timeout: 5000 });
-    const health = await healthRes.json();
-    if (!health.pipeline_loaded) { logger.warn('Pyannote pipeline not loaded — falling back to LLM'); return null; }
+  // HuggingFace free-tier spaces sleep after inactivity and take ~45-90s to cold-start.
+  // We retry the health check up to MAX_HEALTH_RETRIES times with HEALTH_RETRY_DELAY_MS
+  // between attempts before giving up. This covers the full HF cold-start window.
+  const MAX_HEALTH_RETRIES = 4;
+  const HEALTH_RETRY_DELAY_MS = 30000; // 30s per retry → up to 2 min total wait
+  const HEALTH_TIMEOUT_MS = 30000;     // 30s per individual request (was 5s)
 
+  const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+  let pipelineReady = false;
+  for (let attempt = 1; attempt <= MAX_HEALTH_RETRIES; attempt++) {
+    try {
+      logger.info(`Pyannote health check attempt ${attempt}/${MAX_HEALTH_RETRIES}...`);
+      const healthRes = await fetch(`${DIARIZATION_URL}/health`, { timeout: HEALTH_TIMEOUT_MS });
+      const health = await healthRes.json();
+
+      if (health.pipeline_loaded) {
+        logger.info(`Pyannote ready on attempt ${attempt}`);
+        pipelineReady = true;
+        break;
+      }
+
+      // Space is awake but pipeline still loading — wait and retry
+      logger.warn(`Pyannote health: pipeline_loaded=false (attempt ${attempt}/${MAX_HEALTH_RETRIES}) — waiting ${HEALTH_RETRY_DELAY_MS / 1000}s`);
+    } catch (e) {
+      // Space is sleeping / cold-starting — wait and retry
+      logger.warn(`Pyannote health attempt ${attempt}/${MAX_HEALTH_RETRIES} failed: ${e.message} — waiting ${HEALTH_RETRY_DELAY_MS / 1000}s`);
+    }
+
+    if (attempt < MAX_HEALTH_RETRIES) await sleep(HEALTH_RETRY_DELAY_MS);
+  }
+
+  if (!pipelineReady) {
+    logger.warn('Pyannote unavailable after all retries — falling back to VAD timeline');
+    return null;
+  }
+
+  try {
     const form = new FormData();
     form.append('file', fs.createReadStream(audioPath), { filename: path.basename(audioPath), contentType: 'audio/wav' });
     const url = numSpeakers > 1 ? `${DIARIZATION_URL}/diarize?num_speakers=${numSpeakers}` : `${DIARIZATION_URL}/diarize`;
-    // FIX 1: Pyannote diarization wrapped in timeout
     const response = await runWithTimeout(
       fetch(url, { method: 'POST', body: form, headers: form.getHeaders() }),
       900000, // 15 minutes (HF Free Tier CPU can be very slow)
@@ -215,7 +247,7 @@ async function diarizeWithPyannote(audioPath, numSpeakers) {
     logger.info(`Pyannote complete: ${result.segments.length} segments, ${result.num_speakers_detected} speakers`);
     return result.segments;
   } catch (error) {
-    logger.warn(`Pyannote unreachable: ${error.message} — falling back to LLM`);
+    logger.warn(`Pyannote diarize call failed: ${error.message} — falling back to VAD timeline`);
     return null;
   }
 }
@@ -840,7 +872,7 @@ async function processMeeting(job) {
     logger.info(`Attempting Pyannote diarization (${perDeviceAudio.length > 0 ? 'will map via VAD' : 'identity by speaking time'})`);
     const diarSegments = await runWithTimeout(
       diarizeWithPyannote(localAudioPath, attendeeNames.length || perDeviceAudio.length),
-      930000, // 15.5 mins (wraps the inner 15 min timeout)
+      1260000, // 21 mins: up to 2 min cold-start retries + 15 min diarize + buffer
       'Pyannote diarization'
     ).catch(e => { logger.warn(`Pyannote timed out or failed: ${e.message}`); return null; });
 
