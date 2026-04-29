@@ -182,6 +182,7 @@ async function transcribeWithGroq(audioPath, alreadyWavPath = null) {
         model: 'whisper-large-v3',
         response_format: 'verbose_json',
         temperature: 0,
+        timestamp_granularities: ['word', 'segment'], // word-level timestamps for precise speaker splitting
       }),
       300000,
       'Whisper transcription'
@@ -551,9 +552,35 @@ async function assignSpeakersFromDeviceTimeline(segments, perDeviceAudio) {
 // proportional time split point, so rapid dialogue is attributed correctly.
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Split `text` into [before, after] at the sentence boundary closest to
-// `proportion` (0–1) of the total length. Falls back to word boundary.
-function splitAtSentenceBoundary(text, proportion) {
+// ─────────────────────────────────────────────────────────────────────────────
+// WORD-LEVEL TEXT SPLITTER
+//
+// When Whisper word timestamps are available, finds the word whose start time
+// is closest to `boundaryTime` and splits the text exactly there.
+// Falls back to proportional sentence-boundary split when words are absent.
+// This eliminates orphaned trailing words ("Yes,", "Perfect", "in the first
+// few weeks") that the old proportional-split left on the wrong speaker.
+// ─────────────────────────────────────────────────────────────────────────────
+function splitTextAtWordBoundary(text, proportion, segWords, boundaryTime) {
+  // ── PATH 1: Word-level timestamps available ────────────────────────────────
+  if (segWords && segWords.length > 0 && typeof boundaryTime === 'number') {
+    // Find the word whose start time is closest to the Pyannote boundary
+    let bestIdx = 0;
+    let bestDist = Infinity;
+    for (let i = 0; i < segWords.length; i++) {
+      const dist = Math.abs((segWords[i].start || 0) - boundaryTime);
+      if (dist < bestDist) { bestDist = dist; bestIdx = i; }
+    }
+    // Split: words[0..bestIdx-1] → before, words[bestIdx..] → after
+    const before = segWords.slice(0, bestIdx).map(w => w.word).join('');
+    const after  = segWords.slice(bestIdx).map(w => w.word).join('');
+    if (before.trim() && after.trim()) {
+      return [before.trim(), after.trim()];
+    }
+    // Edge case: bestIdx is 0 or all words — fall through to proportional
+  }
+
+  // ── PATH 2: Fallback — proportional sentence-boundary split ───────────────────
   if (!text || proportion <= 0) return ['', text || ''];
   if (proportion >= 1) return [text, ''];
   const targetLen = Math.round(text.length * proportion);
@@ -564,12 +591,10 @@ function splitAtSentenceBoundary(text, proportion) {
   if (sentenceEnds.length > 0) {
     const closest = sentenceEnds.reduce((prev, curr) =>
       Math.abs(curr - targetLen) < Math.abs(prev - targetLen) ? curr : prev);
-    // Only use if it's a non-trivial split (not slicing off <8% or >92%)
     if (closest > text.length * 0.08 && closest < text.length * 0.92) {
       return [text.substring(0, closest).trim(), text.substring(closest).trim()];
     }
   }
-  // Fall back to word boundary
   const words = text.split(/\s+/);
   const cut = Math.max(1, Math.min(words.length - 1, Math.round(words.length * proportion)));
   return [words.slice(0, cut).join(' '), words.slice(cut).join(' ')];
@@ -636,8 +661,8 @@ function mapPyannoteToVadIdentities(groqSegments, pyannoteSegments, perDeviceAud
 
   for (const seg of groqSegments) {
     const segStart = seg.start || 0;
-    const segEnd   = seg.end   || 0;
-    const segDur   = segEnd - segStart;
+    const segEnd = seg.end || 0;
+    const segDur = segEnd - segStart;
 
     // All Pyannote segments that overlap this Whisper segment, sorted by time
     const overlapping = pyannoteSegments
@@ -653,7 +678,7 @@ function mapPyannoteToVadIdentities(groqSegments, pyannoteSegments, perDeviceAud
     const spans = [];
     for (const p of overlapping) {
       const spStart = Math.max(segStart, p.start);
-      const spEnd   = Math.min(segEnd, p.end);
+      const spEnd = Math.min(segEnd, p.end);
       if (spEnd <= spStart) continue;
       const spk = speakerMap[p.speaker] || fallback;
       if (spans.length > 0 && spans[spans.length - 1].speaker === spk) {
@@ -666,34 +691,49 @@ function mapPyannoteToVadIdentities(groqSegments, pyannoteSegments, perDeviceAud
     if (spans.length === 0) { result.push({ ...seg, speaker: fallback }); continue; }
     if (spans.length === 1) { result.push({ ...seg, speaker: spans[0].speaker }); continue; }
 
-    // Multiple speakers — split text proportionally at sentence boundaries
+    // Multiple speakers — split at exact word boundary using Whisper word timestamps,
+    // falling back to proportional sentence split when word timestamps are absent.
     let remainingText = (seg.text || '').trim();
-    let remainingDur  = segDur;
+    let remainingWords = Array.isArray(seg.words) ? [...seg.words] : null;
+    let remainingDur = segDur;
 
     for (let i = 0; i < spans.length; i++) {
-      const span   = spans[i];
+      const span = spans[i];
       const spanDur = span.end - span.start;
-      const isLast  = i === spans.length - 1;
+      const isLast = i === spans.length - 1;
 
       let textPart;
+      let wordsAfter = null;
+
       if (isLast || remainingDur <= 0) {
-        textPart      = remainingText;
+        textPart = remainingText;
         remainingText = '';
       } else {
+        // The Pyannote boundary is the START of the next span
+        const boundaryTime = spans[i + 1].start;
         const proportion = remainingDur > 0 ? spanDur / remainingDur : 0;
-        [textPart, remainingText] = splitAtSentenceBoundary(remainingText, proportion);
+        [textPart, remainingText] = splitTextAtWordBoundary(
+          remainingText, proportion, remainingWords, boundaryTime
+        );
         remainingDur -= spanDur;
+
+        // Advance the word list: drop words that now belong to the before-part
+        if (remainingWords) {
+          const beforeWordCount = textPart.trim().split(/\s+/).filter(Boolean).length;
+          wordsAfter = remainingWords.slice(beforeWordCount);
+          remainingWords = wordsAfter;
+        }
       }
 
       if (textPart && textPart.trim()) {
         result.push({
           ...seg,
-          start:     span.start,
-          end:       span.end,
+          start: span.start,
+          end: span.end,
           startTime: span.start,
-          endTime:   span.end,
-          text:      textPart.trim(),
-          speaker:   span.speaker,
+          endTime: span.end,
+          text: textPart.trim(),
+          speaker: span.speaker,
         });
       }
     }

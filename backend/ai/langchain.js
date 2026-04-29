@@ -172,7 +172,6 @@ const scoreAttendeeChain = async (attendeeName, transcript, domain, transcriptSe
     let formattedTranscript;
 
     if (transcriptSegments && transcriptSegments.length > 0) {
-      const fullTranscript = buildSegmentTranscript(transcriptSegments, 40000);
 
       const attendeeSegments = transcriptSegments.filter(
         seg => seg.speaker && seg.speaker.toLowerCase() === attendeeName.toLowerCase()
@@ -191,15 +190,14 @@ const scoreAttendeeChain = async (attendeeName, transcript, domain, transcriptSe
         return text.split(' ').length > 3 && !fillerWords.includes(text.replace(/[^a-z]/g, ''));
       });
 
-      formattedTranscript = `FULL MEETING TRANSCRIPT:
-${fullTranscript}
+      // ── Token-efficient context: compact 120-char-per-segment summary instead
+      // of the full transcript, cutting per-attendee cost by ~75%.
+      const compactContext = transcriptSegments
+        .map(seg => `${seg.speaker}: ${seg.text.substring(0, 120)}`)
+        .join('\n')
+        .substring(0, 6000); // hard cap ~1,500 tokens of context
 
----
-ANALYSIS FOR ${attendeeName.toUpperCase()}:
-- Total segments spoken: ${attendeeSpeakingTime} out of ${totalSegments} (${speakingPercentage}% speaking time)
-- Substantive segments (excluding filler): ${substantiveSegments.length}
-- Their exact words: "${attendeeLines.substring(0, 3000)}"
-- Note: If speaking time is 0% or words are only filler, score must be 0-2`;
+      formattedTranscript = `MEETING CONTEXT (compact):\n${compactContext}\n\n---\nANALYSIS FOR ${attendeeName.toUpperCase()}:\n- Total segments spoken: ${attendeeSpeakingTime} out of ${totalSegments} (${speakingPercentage}% speaking time)\n- Substantive segments (excluding filler): ${substantiveSegments.length}\n- Their exact words: "${attendeeLines.substring(0, 3000)}"\n- Note: If speaking time is 0% or words are only filler, score must be 0-2`;
     } else {
       formattedTranscript = transcript.substring(0, 12000);
     }
