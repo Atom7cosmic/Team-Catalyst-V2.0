@@ -20,7 +20,7 @@ const logger = winston.createLogger({
 // 120s covers the largest typical analysis payloads comfortably.
 const llm = new ChatGroq({
   apiKey: process.env.GROQ_API_KEY,
-  model: 'mixtral-8x7b-32768',
+  model: 'openai/gpt-oss-120b',
   temperature: 0.2,
   maxTokens: 4096,
   timeout: 120000, // 2 minutes — applies to every llm.invoke() call on this instance

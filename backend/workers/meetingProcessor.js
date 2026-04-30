@@ -467,7 +467,7 @@ Return ONLY a valid JSON array (no markdown, no explanation):
       // FIX 1: LLM speaker inference wrapped in timeout
       const response = await runWithTimeout(
         groq.chat.completions.create({
-          model: 'mixtral-8x7b-32768',
+          model: 'openai/gpt-oss-120b',
           messages: [{ role: 'user', content: prompt }],
           temperature: 0.1, max_tokens: 4096
         }),
