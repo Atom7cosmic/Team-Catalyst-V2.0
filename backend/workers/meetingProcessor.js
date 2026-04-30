@@ -293,99 +293,137 @@ function mergeShortSegments(segments, minDuration = 1.0) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// POST-PROCESSING: cleanupOrphanSegments + collapseSameSpeaker
+// POST-PROCESSING: Segment Cleanup
 //
-// Two passes run after deduplication to clean up the output of Pyannote
-// boundary splitting:
-//
-// PASS 1 — Orphan absorption
-//   Short fragments (≤3 words or ≤1.5s) that look like continuation text
-//   (don’t start with a capital letter after the previous speaker ended, or
-//   are clearly sentence continuations) are merged into the nearest neighbor
-//   (prefer the previous segment, fall back to next). This eliminates:
-//     • “Bob CTO: technically” (1 word)
-//     • “Alice CEO: From” (1 word, end of Alice’s turn bleeding into Bob)
-//     • “Carol VP: aim” (1 word)
-//
-// PASS 2 — Same-speaker collapse
-//   Consecutive segments from the same speaker are joined into a single
-//   continuous turn. This eliminates the visible back-and-forth artefacts
-//   where one person’s sentence is split across 2–3 segments in the output.
+// 1. fixMidSentenceSplits: Pyannote boundaries often split mid-sentence. If a
+//    segment ends with no punctuation and the next starts lowercase, we move
+//    the continuation to the correct speaker.
+// 2. absorbOrphans: Short fragments (≤3 words) are absorbed into the neighbor.
+// 3. collapseSameSpeaker: Consecutive segments from the same speaker are joined.
 // ─────────────────────────────────────────────────────────────────────────────
-const ORPHAN_MAX_WORDS = 3;
-const ORPHAN_MAX_DURATION = 1.5; // seconds
-
-function cleanupOrphanSegments(segments) {
+function postProcessSegments(segments) {
   if (!segments || segments.length <= 1) return segments;
 
-  // PASS 1: absorb orphans into neighbors
-  let pass1 = [...segments];
+  let out = JSON.parse(JSON.stringify(segments));
   let changed = true;
+
+  // PASS 1: Fix mid-sentence splits
   while (changed) {
     changed = false;
-    const out = [];
-    let i = 0;
-    while (i < pass1.length) {
-      const seg = pass1[i];
-      const wordCount = (seg.text || '').trim().split(/\s+/).filter(Boolean).length;
-      const duration = (seg.endTime || seg.end || 0) - (seg.startTime || seg.start || 0);
-      const isOrphan = wordCount <= ORPHAN_MAX_WORDS || duration <= ORPHAN_MAX_DURATION;
+    for (let i = 0; i < out.length - 1; i++) {
+      const prev = out[i];
+      const next = out[i + 1];
 
-      if (isOrphan && pass1.length > 1) {
-        // Prefer merging into the previous segment if it exists and is the same speaker
-        // or merging into next if same speaker, otherwise merge into nearest by time
-        const prev = out.length > 0 ? out[out.length - 1] : null;
-        const next = i + 1 < pass1.length ? pass1[i + 1] : null;
+      if (prev.speaker === next.speaker) continue;
 
-        if (prev && prev.speaker === seg.speaker) {
-          // Same speaker as previous — just extend
-          prev.text = (prev.text || '').trimEnd() + ' ' + (seg.text || '').trim();
-          prev.endTime = seg.endTime || seg.end || prev.endTime;
-          prev.end = prev.endTime;
+      const prevText = (prev.text || '').trim();
+      const nextText = (next.text || '').trim();
+      if (!prevText || !nextText) continue;
+
+      // Rule A: Prev has trailing dangling words (≤4 words) after a period
+      const prevTrailingMatch = prevText.match(/^(.*[.!?])\s+([^.!?]+)$/);
+      if (prevTrailingMatch) {
+        const trailingWords = prevTrailingMatch[2].split(/\s+/);
+        if (trailingWords.length <= 4) {
+          prev.text = prevTrailingMatch[1].trim();
+          next.text = trailingWords.join(' ') + ' ' + nextText;
           changed = true;
-          i++;
-          continue;
-        } else if (next && next.speaker === seg.speaker) {
-          // Same speaker as next — prepend to next
-          pass1[i + 1] = {
-            ...next,
-            text: (seg.text || '').trim() + ' ' + (next.text || '').trim(),
-            startTime: seg.startTime || seg.start || next.startTime,
-            start: seg.startTime || seg.start || next.startTime,
-          };
-          changed = true;
-          i++;
-          continue;
-        } else if (prev) {
-          // Different speaker but previous is closer in time — absorb into previous
-          prev.text = (prev.text || '').trimEnd() + ' ' + (seg.text || '').trim();
-          prev.endTime = seg.endTime || seg.end || prev.endTime;
-          prev.end = prev.endTime;
-          changed = true;
-          i++;
-          continue;
-        } else if (next) {
-          // No previous — absorb into next
-          pass1[i + 1] = {
-            ...next,
-            text: (seg.text || '').trim() + ' ' + (next.text || '').trim(),
-            startTime: seg.startTime || seg.start || next.startTime,
-            start: seg.startTime || seg.start || next.startTime,
-          };
-          changed = true;
-          i++;
-          continue;
+          break;
         }
       }
-      out.push({ ...seg });
-      i++;
+
+      // Rule B: Prev has NO punctuation at the end
+      const prevEndsPunctuation = /[.!?]$/.test(prevText);
+      const nextStartsLowercase = /^[a-z]/.test(nextText);
+
+      if (!prevEndsPunctuation) {
+        // 1. Next has a sentence ending. Move up to ending to prev.
+        const nextMatch = nextText.match(/^([^.!?]+[.!?])\s+(.*)$/);
+        if (nextMatch) {
+          prev.text = prevText + ' ' + nextMatch[1].trim();
+          next.text = nextMatch[2].trim();
+          changed = true;
+          break;
+        }
+
+        // 2. Next starts lowercase, no punctuation. Split at first Capitalized word.
+        if (nextStartsLowercase) {
+          const capMatch = nextText.match(/^([^A-Z.!?]+)\s+([A-Z].*)$/);
+          if (capMatch) {
+            prev.text = prevText + ' ' + capMatch[1].trim();
+            next.text = capMatch[2].trim();
+            changed = true;
+            break;
+          } else {
+            // No capital letters, absorb entirely if short
+            const nextWordCount = nextText.split(/\s+/).length;
+            if (nextWordCount <= 8) {
+              prev.text = prevText + ' ' + nextText;
+              next.text = '';
+              changed = true;
+              break;
+            }
+          }
+        }
+      }
     }
-    pass1 = out;
+    out = out.filter(s => (s.text || '').trim().length > 0);
   }
 
-  // PASS 2: collapse consecutive same-speaker segments
+  // PASS 2: Absorb remaining orphans
+  changed = true;
+  while (changed) {
+    changed = false;
+    const pass2 = [];
+    let i = 0;
+    while (i < out.length) {
+      const seg = out[i];
+      const wordCount = (seg.text || '').trim().split(/\s+/).filter(Boolean).length;
+      const duration = (seg.endTime || seg.end || 0) - (seg.startTime || seg.start || 0);
+      const isOrphan = wordCount <= 3 || duration <= 1.5;
+
+      if (isOrphan && out.length > 1) {
+        const prev = pass2.length > 0 ? pass2[pass2.length - 1] : null;
+        const next = i + 1 < out.length ? out[i + 1] : null;
+
+        if (prev && prev.speaker === seg.speaker) {
+          prev.text = (prev.text || '').trimEnd() + ' ' + (seg.text || '').trim();
+          prev.endTime = seg.endTime || seg.end || prev.endTime;
+          changed = true;
+          i++; continue;
+        } else if (next && next.speaker === seg.speaker) {
+          out[i + 1] = { ...next, text: (seg.text || '').trim() + ' ' + (next.text || '').trim(), startTime: seg.startTime || seg.start || next.startTime };
+          changed = true;
+          i++; continue;
+        } else if (prev && next) {
+          const distPrev = (seg.startTime || seg.start || 0) - (prev.endTime || prev.end || 0);
+          const distNext = (next.startTime || next.start || 0) - (seg.endTime || seg.end || 0);
+          if (distPrev <= distNext) {
+            prev.text = (prev.text || '').trimEnd() + ' ' + (seg.text || '').trim();
+            prev.endTime = seg.endTime || seg.end || prev.endTime;
+            changed = true; i++; continue;
+          } else {
+            out[i + 1] = { ...next, text: (seg.text || '').trim() + ' ' + (next.text || '').trim(), startTime: seg.startTime || seg.start || next.startTime };
+            changed = true; i++; continue;
+          }
+        } else if (prev) {
+          prev.text = (prev.text || '').trimEnd() + ' ' + (seg.text || '').trim();
+          prev.endTime = seg.endTime || seg.end || prev.endTime;
+          changed = true; i++; continue;
+        } else if (next) {
+          out[i + 1] = { ...next, text: (seg.text || '').trim() + ' ' + (next.text || '').trim(), startTime: seg.startTime || seg.start || next.startTime };
+          changed = true; i++; continue;
+        }
+      }
+      pass2.push({ ...seg });
+      i++;
+    }
+    out = pass2;
+  }
+
+  // PASS 3: Collapse consecutive same-speaker segments
   const collapsed = [];
-  for (const seg of pass1) {
+  for (const seg of out) {
     const prev = collapsed.length > 0 ? collapsed[collapsed.length - 1] : null;
     if (prev && prev.speaker === seg.speaker) {
       prev.text = (prev.text || '').trimEnd() + ' ' + (seg.text || '').trim();
@@ -1153,8 +1191,8 @@ async function processMeeting(job) {
       if (!isDup) dedupedSegments.push(seg);
     }
 
-    // Post-processing: absorb orphan fragments and collapse same-speaker runs
-    const cleanedSegments = cleanupOrphanSegments(dedupedSegments);
+    // Post-processing: fix mid-sentence splits, absorb orphans, and collapse same-speaker runs
+    const cleanedSegments = postProcessSegments(dedupedSegments);
     logger.info(`Segments after cleanup: ${cleanedSegments.length} (was ${dedupedSegments.length} after dedup)`);
 
     const transcriptSegments = cleanedSegments.map(seg => ({
