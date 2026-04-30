@@ -292,6 +292,113 @@ function mergeShortSegments(segments, minDuration = 1.0) {
   return merged;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// POST-PROCESSING: cleanupOrphanSegments + collapseSameSpeaker
+//
+// Two passes run after deduplication to clean up the output of Pyannote
+// boundary splitting:
+//
+// PASS 1 — Orphan absorption
+//   Short fragments (≤3 words or ≤1.5s) that look like continuation text
+//   (don’t start with a capital letter after the previous speaker ended, or
+//   are clearly sentence continuations) are merged into the nearest neighbor
+//   (prefer the previous segment, fall back to next). This eliminates:
+//     • “Bob CTO: technically” (1 word)
+//     • “Alice CEO: From” (1 word, end of Alice’s turn bleeding into Bob)
+//     • “Carol VP: aim” (1 word)
+//
+// PASS 2 — Same-speaker collapse
+//   Consecutive segments from the same speaker are joined into a single
+//   continuous turn. This eliminates the visible back-and-forth artefacts
+//   where one person’s sentence is split across 2–3 segments in the output.
+// ─────────────────────────────────────────────────────────────────────────────
+const ORPHAN_MAX_WORDS = 3;
+const ORPHAN_MAX_DURATION = 1.5; // seconds
+
+function cleanupOrphanSegments(segments) {
+  if (!segments || segments.length <= 1) return segments;
+
+  // PASS 1: absorb orphans into neighbors
+  let pass1 = [...segments];
+  let changed = true;
+  while (changed) {
+    changed = false;
+    const out = [];
+    let i = 0;
+    while (i < pass1.length) {
+      const seg = pass1[i];
+      const wordCount = (seg.text || '').trim().split(/\s+/).filter(Boolean).length;
+      const duration = (seg.endTime || seg.end || 0) - (seg.startTime || seg.start || 0);
+      const isOrphan = wordCount <= ORPHAN_MAX_WORDS || duration <= ORPHAN_MAX_DURATION;
+
+      if (isOrphan && pass1.length > 1) {
+        // Prefer merging into the previous segment if it exists and is the same speaker
+        // or merging into next if same speaker, otherwise merge into nearest by time
+        const prev = out.length > 0 ? out[out.length - 1] : null;
+        const next = i + 1 < pass1.length ? pass1[i + 1] : null;
+
+        if (prev && prev.speaker === seg.speaker) {
+          // Same speaker as previous — just extend
+          prev.text = (prev.text || '').trimEnd() + ' ' + (seg.text || '').trim();
+          prev.endTime = seg.endTime || seg.end || prev.endTime;
+          prev.end = prev.endTime;
+          changed = true;
+          i++;
+          continue;
+        } else if (next && next.speaker === seg.speaker) {
+          // Same speaker as next — prepend to next
+          pass1[i + 1] = {
+            ...next,
+            text: (seg.text || '').trim() + ' ' + (next.text || '').trim(),
+            startTime: seg.startTime || seg.start || next.startTime,
+            start: seg.startTime || seg.start || next.startTime,
+          };
+          changed = true;
+          i++;
+          continue;
+        } else if (prev) {
+          // Different speaker but previous is closer in time — absorb into previous
+          prev.text = (prev.text || '').trimEnd() + ' ' + (seg.text || '').trim();
+          prev.endTime = seg.endTime || seg.end || prev.endTime;
+          prev.end = prev.endTime;
+          changed = true;
+          i++;
+          continue;
+        } else if (next) {
+          // No previous — absorb into next
+          pass1[i + 1] = {
+            ...next,
+            text: (seg.text || '').trim() + ' ' + (next.text || '').trim(),
+            startTime: seg.startTime || seg.start || next.startTime,
+            start: seg.startTime || seg.start || next.startTime,
+          };
+          changed = true;
+          i++;
+          continue;
+        }
+      }
+      out.push({ ...seg });
+      i++;
+    }
+    pass1 = out;
+  }
+
+  // PASS 2: collapse consecutive same-speaker segments
+  const collapsed = [];
+  for (const seg of pass1) {
+    const prev = collapsed.length > 0 ? collapsed[collapsed.length - 1] : null;
+    if (prev && prev.speaker === seg.speaker) {
+      prev.text = (prev.text || '').trimEnd() + ' ' + (seg.text || '').trim();
+      prev.endTime = seg.endTime || seg.end || prev.endTime;
+      prev.end = prev.endTime;
+    } else {
+      collapsed.push({ ...seg });
+    }
+  }
+
+  return collapsed;
+}
+
 async function inferSpeakersWithLLM(segments, attendeeNames) {
   if (!segments || segments.length === 0) return [];
   if (attendeeNames.length === 1) return segments.map(seg => ({ ...seg, speaker: attendeeNames[0] }));
@@ -1046,7 +1153,11 @@ async function processMeeting(job) {
       if (!isDup) dedupedSegments.push(seg);
     }
 
-    const transcriptSegments = dedupedSegments.map(seg => ({
+    // Post-processing: absorb orphan fragments and collapse same-speaker runs
+    const cleanedSegments = cleanupOrphanSegments(dedupedSegments);
+    logger.info(`Segments after cleanup: ${cleanedSegments.length} (was ${dedupedSegments.length} after dedup)`);
+
+    const transcriptSegments = cleanedSegments.map(seg => ({
       speaker: seg.speaker || 'Unknown Speaker',
       startTime: seg.startTime || seg.start || 0,
       endTime: seg.endTime || seg.end || 0,

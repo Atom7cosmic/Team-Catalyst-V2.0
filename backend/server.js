@@ -97,9 +97,7 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString(), uptime: process.uptime() });
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// VAD scoring helper
-// ─────────────────────────────────────────────────────────────────────────────
+// vad scoring helper
 function pLimit(concurrency) {
   const queue = [];
   let activeCount = 0;
@@ -146,7 +144,7 @@ const rooms = new Map();
 // audio-chunk now uploads to S3 immediately (fire-and-forget). This means
 // chunks survive socket disconnects, start-recording queue resets, and race
 // conditions between end and flush-my-chunks.
-// ─────────────────────────────────────────────────────────────────────────────
+
 const chunkIndexCounters = new Map(); // Map<`${meetingId}:${userId}`, number>
 
 function nextChunkIndex(meetingId, userId) {
