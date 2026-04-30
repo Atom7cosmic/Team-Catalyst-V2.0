@@ -573,7 +573,7 @@ function splitTextAtWordBoundary(text, proportion, segWords, boundaryTime) {
     }
     // Split: words[0..bestIdx-1] → before, words[bestIdx..] → after
     const before = segWords.slice(0, bestIdx).map(w => w.word).join('');
-    const after  = segWords.slice(bestIdx).map(w => w.word).join('');
+    const after = segWords.slice(bestIdx).map(w => w.word).join('');
     if (before.trim() && after.trim()) {
       return [before.trim(), after.trim()];
     }
@@ -754,6 +754,85 @@ function formatTime(seconds) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// MIX PER-DEVICE CHUNKS
+// ─────────────────────────────────────────────────────────────────────────────
+async function buildMixedAudioFromChunks(perDeviceAudio, meetingId) {
+  const tempDir = '/temp/mix_' + meetingId;
+  if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+
+  const participantWavs = [];
+  const validTimes = perDeviceAudio.map(d => d.recordingStartTime).filter(t => t > 0 && t < Date.now());
+  const meetingEpoch = validTimes.length > 0 ? Math.min(...validTimes) : Date.now();
+
+  for (const device of perDeviceAudio) {
+    if (!device.chunks || device.chunks.length === 0) continue;
+
+    device.chunks.sort((a, b) => a.chunkIndex - b.chunkIndex);
+
+    const listFile = path.join(tempDir, `list_${device.userId}.txt`);
+    let listContent = '';
+
+    for (let i = 0; i < device.chunks.length; i++) {
+      const chunk = device.chunks[i];
+      const chunkPath = await downloadAudio(chunk.audioKey);
+      listContent += `file '${chunkPath}'\n`;
+    }
+
+    fs.writeFileSync(listFile, listContent);
+
+    const userWavPath = path.join(tempDir, `user_${device.userId}.wav`);
+    await new Promise((resolve, reject) => {
+      ffmpeg()
+        .input(listFile)
+        .inputOptions(['-f concat', '-safe 0'])
+        .output(userWavPath)
+        .on('end', () => resolve(userWavPath))
+        .on('error', (err) => {
+          logger.warn(`Failed to concat chunks for ${device.userId}: ${err.message}`);
+          resolve(userWavPath);
+        })
+        .run();
+    });
+
+    if (fs.existsSync(userWavPath)) {
+      const delayMs = Math.max(0, (device.recordingStartTime || meetingEpoch) - meetingEpoch);
+      participantWavs.push({ path: userWavPath, delayMs });
+    }
+  }
+
+  if (participantWavs.length === 0) {
+    throw new Error('No audio chunks could be processed to mix.');
+  }
+
+  if (participantWavs.length === 1 && participantWavs[0].delayMs === 0) {
+    return participantWavs[0].path;
+  }
+
+  const mixedWavPath = path.join(tempDir, `mixed_${meetingId}.wav`);
+  let cmd = ffmpeg();
+  let filterStr = '';
+
+  participantWavs.forEach((wav, i) => {
+    cmd = cmd.input(wav.path);
+    filterStr += `[${i}:a]adelay=${wav.delayMs}|${wav.delayMs}[a${i}];`;
+  });
+
+  const mixInputs = participantWavs.map((_, i) => `[a${i}]`).join('');
+  filterStr += `${mixInputs}amix=inputs=${participantWavs.length}:duration=longest:dropout_transition=2[out]`;
+
+  await new Promise((resolve, reject) => {
+    cmd
+      .complexFilter(filterStr, 'out')
+      .output(mixedWavPath)
+      .on('end', () => resolve(mixedWavPath))
+      .on('error', reject)
+      .run();
+  });
+
+  return mixedWavPath;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // CORE PROCESSING FUNCTION
 // ─────────────────────────────────────────────────────────────────────────────
 async function processMeeting(job) {
@@ -797,11 +876,17 @@ async function processMeeting(job) {
     await updateStep(meetingId, 'upload', 'done', 'Audio received', io);
     await updateStep(meetingId, 'transcription', 'running', 'Starting transcription', io);
 
-    if (!audioKey) throw new Error('No mixed audio recording available — cannot transcribe');
-
     // ── TRANSCRIPTION ─────────────────────────────────────────────────────
-    logger.info('Transcribing mixed audio');
-    localAudioPath = await downloadAudio(audioKey);
+    if (!audioKey && perDeviceAudio.length > 0) {
+      logger.info('No mixed audio recording found — building mixed audio from per-device chunks');
+      await updateStep(meetingId, 'transcription', 'running', 'Mixing per-device audio streams', io);
+      localAudioPath = await buildMixedAudioFromChunks(perDeviceAudio, meetingId);
+    } else if (audioKey) {
+      logger.info('Transcribing mixed audio');
+      localAudioPath = await downloadAudio(audioKey);
+    } else {
+      throw new Error('No mixed audio recording available and no device chunks found — cannot transcribe');
+    }
 
     // getAudioDuration returns { duration, wavPath }.
     // When wavPath is non-null it is the WAV we converted for probing —
